@@ -1,0 +1,89 @@
+# Standalone ChucK-on-Daisy proof of life (M1 from docs/dev/chuck-impl.md). Builds a BOOT_QSPI app
+# (code in QSPI flash, ChucK heap in the SDRAM --wrap pool) linked against the cross-compiled
+# libchuck.a. Deliberately separate from the sk-engines SRAM firmware/Makefile and from the Csound
+# Pod harness (pod/Makefile).
+#
+#   make -f Makefile.chuck              - build the harness (ChuckEngine behind IEngine)
+#   make -f Makefile.chuck program-dfu  - flash over USB DFU (catch the bootloader's DFU window)
+#
+# Prereq (once): build libchuck.a + the shim sysroot with scripts/fetch_chuck.sh.
+
+APP_TYPE = BOOT_QSPI
+
+# The sk-engines contract headers (common.h: std::clamp) need C++17; libDaisy defaults to gnu++14.
+# ChucK's headers use C++ exceptions + RTTI, and libchuck.a was built with both ON (fetch_chuck.sh),
+# so the engine TU must agree for a matching ABI. The libDaisy CPPFLAGS set -fno-exceptions/-fno-rtti.
+# The stock (upstream) libDaisy in ../libs has no CPP_USER_FLAGS hook, but its core Makefile applies
+# CPP_STANDARD *after* CPPFLAGS, so the -fexceptions/-frtti appended here win over the earlier
+# -fno-exceptions/-fno-rtti. (-std=gnu++17 is also required: common.h's std::clamp needs C++17.)
+CPP_STANDARD = -std=gnu++17 -fexceptions -frtti
+
+TARGET      = harness_chuck
+CPP_SOURCES = harness_chuck.cpp \
+              ../src/engine/chuck/chuck_engine.cpp \
+              ../src/engine/chuck/chuck_alloc.cpp \
+              ../src/engine/led.ring.cpp \
+              ../src/engine/color.cpp
+
+# Daisy libraries (vendored in the sk-engines repo)
+LIBDAISY_DIR = ../libs/libDaisy
+DAISYSP_DIR  = ../libs/DaisySP
+
+# Cross-compiled ChucK static library + headers + shim sysroot (built via scripts/fetch_chuck.sh).
+CHUCK_BASE = ../thirdparty/chuck
+CHUCK_CORE = $(CHUCK_BASE)/src/core
+CHUCK_SHIM = $(CHUCK_BASE)/Daisy/shim
+CHUCK_LIB  = $(CHUCK_BASE)/Daisy/lib/libchuck.a
+
+C_INCLUDES += -I../src                 # sk-engines contract headers (engine/iengine.h etc.)
+C_INCLUDES += -I$(CHUCK_CORE)          # chuck.h / chuck_globals.h
+C_INCLUDES += -I$(CHUCK_SHIM)          # ck_prelude.h + the POSIX shim headers chuck.h pulls in
+LIBS       += $(CHUCK_LIB)
+
+# ChucK feature defines = the exact set fetch_chuck.sh built libchuck.a with. They MUST match so the
+# ChucK class layouts the engine TU sees agree with the archive (__DISABLE_THREADS__ etc. drop members).
+C_DEFS += -D__PLATFORM_LINUX__ -D__USE_CHUCK_YACC__ \
+  -DCPU_IS_LITTLE_ENDIAN=1 -DCPU_IS_BIG_ENDIAN=0 -DTYPEOF_SF_COUNT_T=__INT64_TYPE__ -DSIZEOF_SF_COUNT_T=8 \
+  -D__DISABLE_MIDI__ -D__DISABLE_WATCHDOG__ -D__DISABLE_NETWORK__ -D__DISABLE_OTF_SERVER__ \
+  -D__ALTER_HID__ -D__DISABLE_HID__ -D__DISABLE_SERIAL__ -D__DISABLE_ASYNCH_IO__ -D__DISABLE_THREADS__ \
+  -D__DISABLE_KBHIT__ -D__DISABLE_PROMPTER__ -D__DISABLE_SHELL__ -D__OLDSCHOOL_RANDOM__
+
+# Route ChucK's C-malloc family to the SDRAM pool (chuck_alloc.cpp); the platform heap stays in SRAM.
+LDFLAGS += -Wl,--wrap=malloc,--wrap=free,--wrap=calloc,--wrap=realloc
+
+# Bisect ChucK init (same flags as the main Makefile): CHUCKLVL=1 (new ChucK only) / 2 (+init) / 3
+# (+compile, default) ; NOCHUCK=1 skips it entirely. Pair with the onboard-LED blinks in harness_chuck.cpp.
+ifdef CHUCKLVL
+C_DEFS += -DCHUCK_RUNTIME_LEVEL=$(CHUCKLVL)
+endif
+ifeq ($(NOCHUCK), 1)
+C_DEFS += -DCHUCK_SKIP_RUNTIME
+endif
+
+# The ChucK QSPI linker script (repo root). alt_qspi_chuck.lds reclaims the unused 186K SRAM_EXEC
+# region into SRAM (the full firmware needs it; harmless headroom here). The app loads at QSPI
+# 0x90040000, the standard Daisy app base, and the harness re-injects VTOR itself, so it boots under
+# any QSPI bootloader -- BOOT_BIN is left unset, defaulting to libDaisy's bundled stock bootloader for
+# `make program-boot`.
+LDSCRIPT = ../alt_qspi_chuck.lds
+
+SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
+include $(SYSTEM_FILES_DIR)/Makefile
+
+# nano.specs (set by the libDaisy Makefile) omits floating-point printf to save space. ChucK's parser
+# stringifies float literals via std::to_string -> __to_xstring -> vsnprintf("%f"), which without float
+# support returns a negative length; libstdc++ then builds string(buf, buf+len) with len<0, computes a
+# ~4 GB size, and std::__throw_length_error -> abort() (the nano libstdc++ stubs every __throw_* to a
+# bare abort, so it is uncatchable). Pull in the float-capable printf to fix it. Localized over SWD:
+# absyn_primary2str -> __to_xstring -> _M_create -> length_error -> abort. See docs/dev/chuck-pod-poc.md.
+LDFLAGS += -u _printf_float
+
+# Flash the QSPI app over ST-Link/SWD instead of USB DFU (no BOOT/RESET button dance). Needs the
+# ST-Link wired to the Daisy SWD pads and the board powered + booted at least once (so the bootloader
+# configured QUADSPI). daisy_qspi.cfg attaches without resetting, writes QSPI via the stmqspi driver,
+# then reboots into the bootloader. Inspect-only attach: `make -f Makefile.chuck openocd-attach`.
+program-swd: $(BUILD_DIR)/$(TARGET_BIN)
+	openocd -f daisy_qspi.cfg -c "init; daisy_program $(abspath $(BUILD_DIR)/$(TARGET_BIN))"
+
+openocd-attach:
+	openocd -f daisy_qspi.cfg -c "init; halt"

@@ -1,6 +1,8 @@
 # Prerequisites
 *.d
 
+libs/
+
 # Compiled Object files
 *.slo
 *.lo
@@ -44,11 +46,15 @@ build/
 Build/
 build-*/
 
+# Cross-compiled engine deps - reproduced on demand by scripts/fetch_{csound,chuck}.sh
+# (source trees + libcsound.a/libchuck.a), so not vendored. See pod/README.md.
+thirdparty/
+
 # CMake generated files
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
-Makefile
+/Makefile
 install_manifest.txt
 compile_commands.json
 
