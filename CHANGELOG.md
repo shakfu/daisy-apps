@@ -26,6 +26,12 @@ under **Unreleased**.
   fetch and cross-compile `libcsound.a` / `libchuck.a`.
 - Documentation: root `README.md` (layout, Targets table, prerequisites, build) and per-app
   `pod/README.md` (behavior, bootloader/heap notes, flashing).
+- Release packaging: a root `Makefile` with `make dist` (and `make gh-release`) driving
+  `scripts/build_release.py`, which clean-builds the full engine x board matrix in one shot and
+  collects version-stamped `daisy-<engine>-<board>-<version>.bin` artifacts under `dist/<version>/`
+  with `SHA256SUMS`, `MANIFEST.txt`, and `RELEASE_NOTES.md` (CHANGELOG section + flashing guide).
+  `RELEASE_ENGINES` / `RELEASE_BOARDS` restrict the matrix to a subset (e.g. a single board or pair),
+  `VERSION` sets the version, and `WITH_HEX=1` also emits `.hex` artifacts.
 
 ### Changed
 
@@ -37,8 +43,9 @@ under **Unreleased**.
 - `thirdparty/` (the Csound/ChucK source trees and static libraries) is gitignored and reproduced on
   demand by the fetch scripts instead of being vendored.
 - Trimmed `src/` to only the engine sources and headers the two harnesses actually compile.
-- Scoped the `.gitignore` rule for `Makefile` to the repo root (`/Makefile`) so `pod/Makefile` is
-  tracked.
+- Dropped the `.gitignore` rule for the root `Makefile` (a vestigial CMake-era ignore) so the new
+  release `Makefile` is tracked; `pod/Makefile` was already tracked. Added a `dist/` ignore for the
+  release artifacts.
 
 ### Removed
 

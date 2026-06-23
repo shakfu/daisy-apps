@@ -68,3 +68,23 @@ make -f Makefile.chuck      # ChucK harness  -> build/harness_chuck.bin
 ```
 
 Both Makefiles share the same `build/` directory but compile shared objects with different defines, so run `rm -rf build` when switching between the Csound and ChucK targets. Flashing instructions are in [`pod/README.md`](pod/README.md).
+
+## Release
+
+`make dist` (root `Makefile`) builds every firmware in the engine x board matrix in one shot and collects version-stamped, checksummed binaries under `dist/<version>/` for users who want to download-and-flash rather than build. It drives [`scripts/build_release.py`](scripts/build_release.py), which clean-builds each `(engine, board)` pair, names the artifacts `daisy-<engine>-<board>-<version>.bin`, and writes `MANIFEST.txt`, `SHA256SUMS`, and `RELEASE_NOTES.md` (the CHANGELOG section for the version plus flashing instructions). The script is stdlib-only, so plain `python3` suffices.
+
+```
+make dist                                          # describe-derived version, full matrix (2 engines x 3 boards)
+make dist VERSION=0.1.0                             # explicit version (the bare tag you will create)
+make dist WITH_HEX=1                                # also emit .hex (ST-Link / STM32CubeProgrammer)
+```
+
+`RELEASE_ENGINES` and `RELEASE_BOARDS` restrict the matrix to a subset (space-separated lists; they override the defaults of `csound chuck` and `pod patch_init patch`). Valid engines are `csound` / `chuck`; valid boards are `pod` / `patch_init` / `patch` — anything else errors with the valid list.
+
+```
+make dist RELEASE_BOARDS=pod                        # one board, both engines (2 artifacts)
+make dist RELEASE_ENGINES=csound                    # one engine, all boards (3 artifacts)
+make dist RELEASE_BOARDS=pod RELEASE_ENGINES=csound # a single pair (1 artifact)
+```
+
+The cross-compiled engine libs (`scripts/fetch_csound.sh` / `scripts/fetch_chuck.sh`) must exist first; the `libDaisy` / `DaisySP` archives are built on demand if missing. Only the `pod` board is hardware-validated, so the `patch_init` / `patch` artifacts are flagged untested in the manifest and notes. `dist/` is gitignored; `make gh-release VERSION=<v>` uploads an already-built `dist/<v>/` as a GitHub release via `gh`.
