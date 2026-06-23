@@ -63,6 +63,11 @@ public:
         c.enc_press    = false;
     }
 
+    // MIDI: not wired for this target (no MIDI input handled here). No-ops so the shared harness
+    // compiles; only the Pod build receives MIDI.
+    void StartMidi() {}
+    template <typename Sink> void PollMidi(Sink&&) {}
+
     // Mono LED: collapse the requested color to on/off (lit if any channel is non-zero).
     void SetIndicator(int idx, float r, float g, float b)
     {

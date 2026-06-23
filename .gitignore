@@ -66,6 +66,9 @@ dist/
 *.bak
 *.swp
 
+# macOS Finder metadata (e.g. examples/.DS_Store)
+.DS_Store
+
 # vcpkg
 vcpkg_installed/
 

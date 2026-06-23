@@ -52,6 +52,11 @@ public:
         c.gate[1]      = hw_.gate_input[daisy::DaisyPatch::GATE_IN_2].State();
     }
 
+    // MIDI: not wired for this target (no MIDI input handled here). No-ops so the shared harness
+    // compiles; only the Pod build receives MIDI.
+    void StartMidi() {}
+    template <typename Sink> void PollMidi(Sink&&) {}
+
     // No discrete LEDs on the Patch (it has an OLED). Indicator output is a no-op until the OLED is
     // modelled; engine/harness indicator calls are harmlessly ignored here.
     void SetIndicator(int, float, float, float) {}

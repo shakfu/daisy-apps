@@ -10,6 +10,12 @@
 
 APP_TYPE = BOOT_QSPI
 
+# Compile the FatFs sources (ff.c + the ccsbcs.c code-page file) into the app so the SD patch bank
+# (sd_stream_deck.h -> chuck/*.ck) links: the vendored libdaisy.a ships ff.o with ff_convert /
+# ff_wtoupper left undefined. FatFs is built with _USE_LFN=1 (static buffer), so it makes no malloc
+# calls and never enters the --wrap SDRAM pool below.
+USE_FATFS = 1
+
 # The sk-engines contract headers (common.h: std::clamp) need C++17; libDaisy defaults to gnu++14.
 # ChucK's headers use C++ exceptions + RTTI, and libchuck.a was built with both ON (fetch_chuck.sh),
 # so the engine TU must agree for a matching ABI. The libDaisy CPPFLAGS set -fno-exceptions/-fno-rtti.

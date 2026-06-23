@@ -7,6 +7,7 @@
 
 #include "engine/chuck/chuck_engine.h"
 #include "engine/chuck/chuck_patch.h"   // chuck_path / scan_chuck_patches / aux_to_index / read_program
+#include "config.h"                     // Config::dynamic() midi_channel_a/b for the channel->deck map
 
 // NOTE: we deliberately do NOT pull in the shim's ck_prelude.h here. That force-include exists so
 // ChucK's *source* (compiled into libchuck.a) finds the POSIX functions it calls without including
@@ -74,6 +75,20 @@ while( true )
     10::ms => now;
 }
 )chuck";
+
+// MIDI-note delivery convention (the ChucK analog of Csound's `instr MidiNote`). MIDI device UGens are
+// compiled out of this bare-metal build (__DISABLE_MIDI__), so the host owns the UART and injects notes
+// into the VM through globals: per audio block, ALL of that block's NoteOns for a deck are handed over as
+// an int array of note numbers (`notesA`) + a count (`noteCountA`), then ONE Event broadcast (`noteOnA`).
+// A `.ck` program declares those three globals and, in a shred, waits on the Event then sporks a voice
+// per note - so a chord (several NoteOns in one block) plays polyphonically. Passing the whole batch is
+// what makes poly work: a shared scalar would be overwritten down to the last note before any shred runs
+// (the globals queue is fully drained before shreds execute each block). NoteOn-only (no NoteOff /
+// velocity): each voice is finite/self-terminating. Programs that declare none of these just ignore MIDI.
+static constexpr int kMaxBlockNotes = 16;      // cap on NoteOns delivered per block per deck (ring is 32)
+static const char* note_event_global(int deck) { return deck == 0 ? "noteOnA"    : "noteOnB"; }
+static const char* note_array_global(int deck) { return deck == 0 ? "notesA"     : "notesB"; }
+static const char* note_count_global(int deck) { return deck == 0 ? "noteCountA" : "noteCountB"; }
 
 // Map a platform ParamId (+ deck) to a ChucK global name + a cache slot, or nullptr for params this
 // engine ignores. The 'A'/'B' suffix lets one program carry both decks. Eight slots per deck
@@ -451,6 +466,27 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
         _inbuf[i * 2 + 1] = ir ? ir[i] : 0.f;
     }
 
+    // Deliver this block's MIDI notes to the VM here (audio thread), right before run() so the queued
+    // globals apply before any shred runs this block (same thread as run(), so no race - mirrors
+    // set_param). Gather all NoteOns per deck into a batch, hand it over as an array + count, then ONE
+    // broadcast: the .ck program sporks a voice per note, so chords play polyphonically (a shared scalar
+    // would coalesce to the last note). setGlobalIntArray allocates, but only on blocks that carry notes.
+    if (Chuck_Globals_Manager* g = ck->globals()) {
+        t_CKINT batch[2][kMaxBlockNotes];
+        int     n[2] = {0, 0};
+        MidiNoteEvent ev;
+        while (_notes.pop(ev)) {
+            const int d = (ev.deck == 0) ? 0 : 1;
+            if (n[d] < kMaxBlockNotes) batch[d][n[d]++] = ev.note;
+        }
+        for (int d = 0; d < 2; d++) {
+            if (n[d] == 0) continue;
+            g->setGlobalIntArray(note_array_global(d), batch[d], static_cast<t_CKUINT>(n[d]));
+            g->setGlobalInt(note_count_global(d), n[d]);
+            g->broadcastGlobalEvent(note_event_global(d));
+        }
+    }
+
     // One VM compute call: consumes _inbuf, advances every shred sample-accurately across n frames,
     // fills _outbuf interleaved (numFrames * _out_ch). SAMPLE == float, so no double marshalling.
     const uint32_t run0 = DWT->CYCCNT;
@@ -523,6 +559,24 @@ void ChuckEngine::set_aux_active(DeckRef::Ref d, bool held)
         if (_sel_preview != _sel) { _reload_target = _sel_preview; _reload_pending = true; }
     }
     _aux_held = held;
+}
+
+DeckRef::Ref ChuckEngine::handle_midi_note(uint8_t channel, uint8_t note)
+{
+    if (!_gate.current()) return DeckRef::Count;   // no VM yet -> not playable; tell the UI not to flash
+
+    // Channel -> deck, matching the platform's configured MIDI channels (same map as CsoundEngine).
+    const Config& c = Config::dynamic();
+    DeckRef::Ref ref = DeckRef::Count;
+    if      (channel == c.midi_channel_a()) ref = DeckRef::A;
+    else if (channel == c.midi_channel_b()) ref = DeckRef::B;
+    if (ref == DeckRef::Count) return DeckRef::Count;
+
+    // Main loop: only enqueue. process() (the audio ISR) drains and delivers to the VM right before
+    // run(), so the globals write + broadcast happen on the run() thread. A full ring drops the note;
+    // still return the deck so the gate-in flashes (the NoteOn was received).
+    _notes.push({ note, static_cast<uint8_t>(ref == DeckRef::A ? 0 : 1) });
+    return ref;
 }
 
 } // namespace daisyapps

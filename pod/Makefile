@@ -12,6 +12,11 @@
 APP_TYPE = BOOT_QSPI
 LDFLAGS += -u _printf_float
 
+# Compile the FatFs sources (ff.c + the ccsbcs.c code-page file) into the app so the SD patch bank
+# (sd_stream_deck.h -> csound/*.csd) links. The vendored libdaisy.a ships ff.o with ff_convert /
+# ff_wtoupper left undefined - they live in option/ccsbcs.c, which libDaisy expects the app to add.
+USE_FATFS = 1
+
 # The sk-engines contract headers (common.h: std::clamp) need C++17; libDaisy defaults to gnu++14.
 CPP_STANDARD = -std=gnu++17
 

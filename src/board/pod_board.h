@@ -53,6 +53,28 @@ public:
         c.gate_count   = kGateCount;
     }
 
+    // --- MIDI (the Pod has a TRS/DIN MIDI input on its UART) ------------------------------------
+    // Begin receiving MIDI. Call once after Init() (which already configured the UART MIDI handler),
+    // before the main loop.
+    void StartMidi() { hw_.midi.StartReceive(); }
+
+    // Main loop: parse buffered MIDI and invoke sink(channel, note) for each NoteOn. A velocity-0 NoteOn
+    // is the running-status NoteOff, so it is dropped to match the engines' NoteOn-only contract. `sink`
+    // is any callable taking (uint8_t channel, uint8_t note) - e.g. a lambda forwarding to
+    // engine.handle_midi_note. Channels are 0-based (0 = MIDI channel 1).
+    template <typename Sink>
+    void PollMidi(Sink&& sink)
+    {
+        hw_.midi.Listen();
+        while (hw_.midi.HasEvents()) {
+            daisy::MidiEvent ev = hw_.midi.PopEvent();
+            if (ev.type == daisy::NoteOn) {
+                daisy::NoteOnEvent n = ev.AsNoteOn();
+                if (n.velocity > 0) sink(n.channel, n.note);
+            }
+        }
+    }
+
     // RGB indicator (idx 0 = led1, 1 = led2). Out-of-range index is a no-op, so engine/harness code
     // that addresses more indicators than a board has degrades gracefully.
     void SetIndicator(int idx, float r, float g, float b)

@@ -26,6 +26,31 @@ under **Unreleased**.
   fetch and cross-compile `libcsound.a` / `libchuck.a`.
 - Documentation: root `README.md` (layout, Targets table, prerequisites, build) and per-app
   `pod/README.md` (behavior, bootloader/heap notes, flashing).
+- SD patch bank for both Pod harnesses: a minimal `pod/sd_stream_deck.h` (`SdStreamDeck`) implementing
+  the two `IStreamDeck` methods the patch bank uses (`exists` / `read_text`) over a FatFs-mounted card,
+  injected as `ctx.stream`. The Csound harness loads `csound/0.csd` .. `csound/7.csd` and the ChucK
+  harness `chuck/0.ck` .. `chuck/7.ck` from the card (built-in orchestra/program as fallback / when no
+  card), boot-auto-loads the first slot, and exposes an encoder-driven selector (hold encoder = Alt,
+  turn knob 1 to scroll, release to recompile live). Both `Makefile`s set `USE_FATFS = 1` so the FatFs
+  sources link. ChucK pushes its knobs from the audio ISR, so a `volatile` flag releases knob 1 to the
+  selector while browsing; FatFs (`_USE_LFN=1`, static buffer) makes no `malloc` calls and stays out of
+  ChucK's `--wrap` SDRAM pool.
+- MIDI NoteOn input for both Pod harnesses. The board abstraction gains `StartMidi()` and a templated
+  `PollMidi(sink)` (real on the Pod's UART MIDI, no-op on the patch targets); the harnesses forward each
+  NoteOn to `engine.handle_midi_note(channel, note)` (channel 1 -> deck A, channel 2 -> deck B via
+  `Config::dynamic()`), and the engines deliver notes from the audio ISR. The Csound engine already
+  played its `instr MidiNote`. ChucK's own `MidiIn` is compiled out of this bare-metal build
+  (`__DISABLE_MIDI__`), so the new `ChuckEngine::handle_midi_note` bridges via globals: per block a deck's
+  NoteOns are handed to the VM as an int array (`notesA`/`notesB`) + count (`noteCountA`/`noteCountB`) and
+  one broadcast Event (`noteOnA`/`noteOnB`), so a patch can spork a voice per note and chords play
+  **polyphonically**. The generic note ring + note->Hz map moved to a shared `src/engine/midi_note.h`
+  (used by both engines). NoteOn-only (finite, self-terminating voices); a `examples/chuck/midi.ck`
+  reference patch shows the ChucK convention.
+- Example patch banks under `examples/` (`examples/csound/0.csd` .. `6.csd`,
+  `examples/chuck/0.ck` .. `7.ck`), each with a README adapted to the Pod harness (encoder selector,
+  no MIDI, only PITCH + MIX driven). `make sd-card SD=/Volumes/<card>` (a thin
+  `scripts/provision_sd.sh`) copies the numbered slots into card-root `csound/` / `chuck/` folders for
+  the loader. `.gitignore` now also ignores `.DS_Store`.
 - Release packaging: a root `Makefile` with `make dist` (and `make gh-release`) driving
   `scripts/build_release.py`, which clean-builds the full engine x board matrix in one shot and
   collects version-stamped `daisy-<engine>-<board>-<version>.bin` artifacts under `dist/<version>/`

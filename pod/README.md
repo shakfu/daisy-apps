@@ -15,15 +15,57 @@ drives `process()` from the audio callback, and forwards the Pod's two knobs to 
 (knob 1 → PITCH/pitch, knob 2 → MIX/level). It compiles the **actual** engine
 (`../src/engine/csound/csound_engine.cpp`), so it exercises the real `IEngine` code path.
 
+### SD patch bank
+
+The harness injects a minimal SD stream service (`sd_stream_deck.h`) as `ctx.stream`, so the engine's
+`.csd` patch bank works. Put numbered slots in a `csound/` folder at the card root —
+`csound/0.csd` .. `csound/7.csd`, each a full CSD document. The engine still boots its built-in
+orchestra; once the card mounts it auto-loads the first present slot (~1 s after boot), and you scroll
+the `[built-in, present slots...]` list with the **encoder selector**:
+
+- **Hold the encoder** to open the bank (the Pod analog of the firmware's Alt pad).
+- **Turn knob 1** while holding to scroll/preview the list (the Alt+PITCH gesture).
+- **Release** to commit — a live `csoundReset` + recompile via `ReloadGate`.
+
+`SdStreamDeck` implements only the two `IStreamDeck` methods the bank uses — `exists()` (f_stat) and
+`read_text()` (f_open/f_read) — over a FatFs-mounted card; the streaming/recording half is stubbed.
+The card must be inserted at power-on (the harness mounts once and does not hot-remount). With no card,
+mount fails harmlessly and the engine runs the built-in orchestra. Linking the bank needs the FatFs
+sources compiled into the app, which the Makefile enables with `USE_FATFS = 1`.
+
+Ready-made patches live in [`../examples/`](../examples/) (`examples/csound/*.csd`,
+`examples/chuck/*.ck`, each with a README). Copy them onto a card with `make sd-card SD=/Volumes/<card>`
+from the repo root. Note the harness drives only knob 1 (PITCH) and knob 2 (MIX), so patches that lean
+on the other control channels play with those parameters fixed; MIDI NoteOn is wired (see below) — see
+the `examples/*/README.md` per-patch notes.
+
 ## What it does NOT exercise
 
-The harness injects no platform services, so it is a **synthesis / opcode / CPU sandbox**, not a full
-repro of the engine's features:
+Beyond the SD patch bank above, the harness injects no other platform services, so it is a
+**synthesis / opcode / CPU sandbox**, not a full repro of the engine's features:
 
-- **No SD card** (`ctx.stream = nullptr`) → only the built-in orchestra; no `/csound/*.csd` patch
-  bank and no Alt+PITCH selector / live recompile.
-- **No MIDI** wiring (the `MidiNote` path is untested here).
 - **No transport/clock or QSPI-settings** services.
+
+### MIDI in
+
+Both harnesses receive MIDI from the Pod's input. The board abstraction exposes `StartMidi()` and a
+templated `PollMidi(sink)` (board-specific: real on the Pod, no-op on the patch targets); the harness
+forwards each NoteOn to `engine.handle_midi_note(channel, note)` from the main loop, and the engine
+drains the notes in the audio ISR. Channel 1 -> deck A, channel 2 -> deck B (`Config::dynamic()`).
+NoteOn only (no NoteOff/velocity), so notes are finite, self-terminating voices. The Csound engine
+plays each patch's `instr MidiNote`. ChucK's own `MidiIn` is compiled out of this bare-metal build
+(`__DISABLE_MIDI__`), so the engine bridges instead: per block it hands a deck's NoteOns to the VM as an
+int array (`notesA`) + count (`noteCountA`) and one broadcast `noteOnA` Event a `.ck` program waits on,
+sporking a voice per note - so chords play **polyphonically**. The generic note ring + note->Hz map live
+in `src/engine/midi_note.h`, shared by both engines. See the `examples/*/README.md` for the per-engine
+note conventions.
+
+Both harnesses wire the SD patch bank the same way: `harness_chuck.cpp` injects the same
+`SdStreamDeck` for a `chuck/0.ck` .. `chuck/7.ck` bank with the identical encoder selector. Its one
+difference is plumbing, not behavior: ChucK pushes the PITCH/MIX knobs from the audio ISR (rate-limited
+per block), so a `volatile` flag tells the ISR to release knob 1 to the selector while the encoder is
+held. (FatFs is built `_USE_LFN=1` / static-buffer, so it makes no `malloc` calls and stays out of
+ChucK's `--wrap` SDRAM pool.)
 
 ## Build & flash
 

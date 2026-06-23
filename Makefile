@@ -25,6 +25,17 @@ dist:
 	RELEASE_ENGINES="$(RELEASE_ENGINES)" RELEASE_BOARDS="$(RELEASE_BOARDS)" \
 	  $(REL_PY) scripts/build_release.py $(VERSION) $(if $(WITH_HEX),--hex,)
 
+# Copy the example patch banks (examples/{csound,chuck}/<n>.{csd,ck}) onto a mounted FAT32 SD card so
+# the harnesses can load them: numbered slots go into a card-root csound/ and chuck/ folder. Set SD to
+# the card mount point; ENGINES restricts which banks to copy (default: both).
+#   make sd-card SD=/Volumes/DAISY                    # both banks
+#   make sd-card SD=/Volumes/DAISY ENGINES=csound     # just one
+ENGINES ?=
+.PHONY: sd-card
+sd-card:
+	@test -n "$(SD)" || { echo "usage: make sd-card SD=/Volumes/<card> [ENGINES='csound chuck']"; exit 1; }
+	scripts/provision_sd.sh $(SD) $(ENGINES)
+
 # Upload an already-built dist/<version>/ as a GitHub release (requires `gh auth login`). Tag the
 # release with the SAME bare version passed to `make dist VERSION=x` so names line up.
 .PHONY: gh-release

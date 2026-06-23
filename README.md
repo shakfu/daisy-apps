@@ -4,7 +4,7 @@ A small collection of apps for the [Electrosmith Daisy](https://www.electro-smit
 
 ## Layout
 
-- `pod/` — the harness apps. `harness_csound.cpp` (built by `Makefile`) and `harness_chuck.cpp` (built by `Makefile.chuck`) each stand in for the platform: build an engine context, init the engine behind the `IEngine` interface, and drive `process()` from the audio callback. See [`pod/README.md`](pod/README.md) for what they do, the bootloader/heap caveats, and flashing.
+- `pod/` — the harness apps. `harness_csound.cpp` (built by `Makefile`) and `harness_chuck.cpp` (built by `Makefile.chuck`) each stand in for the platform: build an engine context, init the engine behind the `IEngine` interface, and drive `process()` from the audio callback. Both inject a minimal SD service (`sd_stream_deck.h`) as `ctx.stream`, so the engines load a numbered patch bank from the card (`csound/0.csd` .. `csound/7.csd` / `chuck/0.ck` .. `chuck/7.ck`), with the built-in orchestra/program as fallback; an encoder-driven selector (hold encoder, turn knob 1, release) switches patches with a live recompile. Both also receive MIDI NoteOn from the Pod's input and forward it to the engine (Csound plays the patch's `instr MidiNote`; ChucK broadcasts a note Event a `.ck` program can wait on). See [`pod/README.md`](pod/README.md) for the patch bank, MIDI, the bootloader/heap caveats, and flashing.
 
 - `src/` — the engine sources and contract headers the harnesses compile and include (the `CsoundEngine` / `ChuckEngine` implementations plus the shared `engine/*.h` interfaces). Trimmed to only the files the two harnesses actually depend on.
 
@@ -12,7 +12,9 @@ A small collection of apps for the [Electrosmith Daisy](https://www.electro-smit
 
 - `libs/` — vendored Daisy ecosystem (a DaisyExamples-style tree). `libDaisy` and `DaisySP` are git submodules; the other board folders are upstream examples. The harness Makefiles link `libs/libDaisy` and `libs/DaisySP`.
 
-- `scripts/` — `fetch_csound.sh` / `fetch_chuck.sh`, which fetch and cross-build the Csound / ChucK static libraries on demand (see below).
+- `examples/` — example patch banks for the SD loader: `examples/csound/0.csd` .. `6.csd` and `examples/chuck/0.ck` .. `7.ck`, each with a README describing the patches and how they behave on the Pod harness. Copy them onto a card with `make sd-card` (see Release/SD below).
+
+- `scripts/` — `fetch_csound.sh` / `fetch_chuck.sh`, which fetch and cross-build the Csound / ChucK static libraries on demand (see below); `provision_sd.sh`, which copies the example patch banks onto a mounted SD card (driven by `make sd-card`).
 
 - `thirdparty/` — cross-compiled `libcsound.a` / `libchuck.a` and their source trees. **Gitignored and reproduced on demand** by the fetch scripts rather than vendored.
 
@@ -68,6 +70,19 @@ make -f Makefile.chuck      # ChucK harness  -> build/harness_chuck.bin
 ```
 
 Both Makefiles share the same `build/` directory but compile shared objects with different defines, so run `rm -rf build` when switching between the Csound and ChucK targets. Flashing instructions are in [`pod/README.md`](pod/README.md).
+
+## SD patch banks
+
+Each harness loads a numbered patch bank from a FAT32 SD card — `csound/0.csd` .. `7.csd` for the Csound harness, `chuck/0.ck` .. `7.ck` for the ChucK harness — at the card root, with the built-in orchestra/program as the fallback. The engine boot-loads the lowest slot ~1 s after power-on; **hold the encoder and turn knob 1** to scroll the bank, release to switch live. Insert the card before power-on (the harness mounts once at boot).
+
+`make sd-card` copies the bundled [`examples/`](examples/) patches onto a mounted card:
+
+```
+make sd-card SD=/Volumes/<card>                 # both banks
+make sd-card SD=/Volumes/<card> ENGINES=csound  # just one
+```
+
+See the per-engine [`examples/csound/README.md`](examples/csound/README.md) / [`examples/chuck/README.md`](examples/chuck/README.md) for what each patch does on the Pod harness (only knob 1 = PITCH and knob 2 = MIX are driven as knobs; MIDI NoteOn is wired — channel 1 = deck A, channel 2 = deck B), and [`pod/README.md`](pod/README.md) for the loader internals.
 
 ## Release
 

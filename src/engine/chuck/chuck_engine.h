@@ -5,6 +5,7 @@
 #include "engine/iengine.h"
 #include "engine/chuck/chuck_patch.h"        // kMaxChuckSlots (bank size) + the SD .ck selector
 #include "engine/csound/csound_reload.h"     // ReloadGate: lock-free VM<->ISR handoff for live swap
+#include "engine/midi_note.h"                // NoteQueue / MidiNoteEvent / midi_note_to_hz (MIDI-in)
 
 // SKETCH (2026-06, M2): ChuckEngine wraps a ChucK runtime (the language/VM/UGens) behind IEngine,
 // modelled directly on CsoundEngine. Like Csound, it builds ONLY in the QSPI firmware target - the
@@ -51,6 +52,11 @@ public:
     // Alt+PITCH (CapAux) held on deck A: the patch selector. set_param(Aux) previews; this commits a
     // live recompile in prepare() on the held->release edge.
     void         set_aux_active(DeckRef::Ref d, bool active) override;
+
+    // MIDI NoteOn -> a global frequency + a broadcast Event the .ck program can wait on (channel->deck,
+    // note->Hz). NoteOn only (no NoteOff/velocity): enqueued on the lock-free ring here (main loop) and
+    // delivered to the VM in process() (audio ISR), right before run(). See chuck_engine.cpp.
+    DeckRef::Ref handle_midi_note(uint8_t channel, uint8_t note) override;
 
 private:
     // Build the ONE persistent ChucK VM: new ChucK / setParam / init / start - NO program compiled yet
@@ -161,6 +167,8 @@ private:
     // Cached 0..1 knob values for param() pickup readback + post-reload reseed, per (ParamId, deck).
     static constexpr int kSlots = 16;     // 8 per deck
     float _cache[kSlots] = {0.f};
+
+    NoteQueue<32> _notes;                 // pending MIDI notes: main loop pushes, process() (ISR) drains
 };
 
 } // namespace daisyapps
