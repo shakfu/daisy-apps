@@ -23,7 +23,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace spotykach {
+namespace daisyapps {
 
 // Number of numbered patch slots probed on the card (/csound/0.csd .. /csound/<N-1>.csd).
 inline constexpr int kMaxPatchSlots = 8;
@@ -92,4 +92,4 @@ inline const char* read_orchestra(IStreamDeck* stream, const char* path, char* b
     return tag;
 }
 
-} // namespace spotykach
+} // namespace daisyapps

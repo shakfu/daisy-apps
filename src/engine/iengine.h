@@ -10,10 +10,8 @@
 #include "engine/deck_ref.h"      // DeckRef (the A/B selector every method takes)
 #include "engine/mode.h"          // Route, ClockSource (contract-owned, items 5b/5c)
 #include "engine/engine_params.h" // ParamId, FxKind, Capabilities
-#include "engine/display_model.h" // DisplayModel
-#include "engine/engine_leds.h"   // FxLeds/PlayLeds/AltLeds/TransportLeds/DeckLeds/RingGeometry
 
-namespace spotykach {
+namespace daisyapps {
 
 // IEngine is the contract between the fixed hardware/UI platform and a swappable DSP engine.
 // A "firmware variant" is a different IEngine implementation behind the same platform.
@@ -27,7 +25,7 @@ namespace spotykach {
 // interface instead of a concrete GranularEngine.
 //
 // The platform-driven input/output surface lives on IEngine (items 2-3): params/config, MIDI, pads,
-// CV/gate, storage, the LED queries, and render(DisplayModel). `core()` is gone; CoreUI/Storage hold
+// CV/gate, and storage. `core()` is gone; CoreUI/Storage hold
 // only IEngine. The contract carries no granular types (Phase 5 R1/R2): DeckRef/Mode/Route/ModType/
 // GritMode/DeckSource/ClockSource are contract-owned (engine/...). Transport is NOT on IEngine: the
 // Driver was split into a platform Transport service (src/transport/) that the platform owns and
@@ -126,30 +124,12 @@ public:
     //     to it (e.g. granular Core, the tempo-synced delay). The old transport_* forwarding group was
     //     removed here when the Driver was split into the platform Transport. -----------------------
 
-    // --- LED queries (item 2b): the engine reports indicator + ring-geometry state; the platform
-    //     owns the color palette + blink/timer/storage/_touched compositing + the MValue overlays.
-    //     Defaults are inert (a non-granular engine returns empty state and the granular-specific
-    //     platform LED code reads nothing). These + render() below are transitional: item 3 unifies
-    //     them into render(DisplayModel&) + the MValue->ParamId value-display toolkit. ---
-    virtual FxLeds   fx_leds(DeckRef::Ref) { return {}; }
-    virtual PlayLeds play_leds(DeckRef::Ref) { return {}; }
-    virtual AltLeds  alt_leds(DeckRef::Ref) { return {}; }
-    virtual DeckLeds      deck_leds(DeckRef::Ref) { return {}; }
-    virtual float mix() const { return 0.5f; }   // A/B crossfade (fader LEDs)
-    virtual Route route() const { return Route::Stereo; } // channel topology (mode L/C/R LED)
-    virtual RingGeometry render_ring(LEDRing& ring, DeckRef::Ref, float breathe_brightness) { return {}; }
-
     // --- CV outputs (DAC). The platform's DAC ISR calls this ONCE per block (not per sample),
     //     fills n samples of the two modulation/LFO CV channels, then converts to the DAC range.
     //     Block-rate by design so the ISR pays no per-sample virtual dispatch. Default = silence. ---
     virtual void process_cv(float* cv0, float* cv1, size_t n) {
         for (size_t i = 0; i < n; i++) { cv0[i] = 0.f; cv1[i] = 0.f; }
     }
-
-    // --- Display: engine fills the panel model; platform blits + composites its overlays.
-    //     Default draws nothing; the granular engine still drives LEDs via the queries above until
-    //     item 3 moves it to render(DisplayModel&). ---
-    virtual void render(DisplayModel&) {}
 };
 
 };

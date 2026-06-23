@@ -15,7 +15,7 @@
 
 #include "csound.h"   // provided by the QSPI build's -I.../Daisy/include/csound
 
-namespace spotykach {
+namespace daisyapps {
 
 // Arms the SDRAM pool for Csound's allocations (csound_alloc.cpp). Called after _hw.Init() (so SDRAM
 // is live), before csoundCreate. No-op-safe if the --wrap allocator isn't linked.
@@ -264,7 +264,6 @@ void CsoundEngine::process(const float* const* in, float** out, size_t size)
     CSOUND* cs = static_cast<CSOUND*>(_gate.begin_use());
     if (!cs || _ksmps <= 0) {                    // no instance (boot fail / mid-reload) -> silence
         for (size_t i = 0; i < size; i++) { out[0][i] = 0.f; out[1][i] = 0.f; }
-        _level *= 0.90f;                         // let the meter decay while silent
         _gate.end_use();
         return;
     }
@@ -295,26 +294,17 @@ void CsoundEngine::process(const float* const* in, float** out, size_t size)
 
     csoundPerformKsmps(cs);                       // one k-cycle: consumes spin, fills spout
 
-    float peak = 0.f;
     for (size_t i = 0; i < n; i++) {              // interleaved spout -> de-interleaved out
-        const float l = static_cast<float>(spout[i * 2]);
-        const float r = static_cast<float>(spout[i * 2 + 1]);
-        out[0][i] = l;
-        out[1][i] = r;
-        const float a = (l < 0 ? -l : l), b = (r < 0 ? -r : r);
-        if (a > peak) peak = a;
-        if (b > peak) peak = b;
+        out[0][i] = static_cast<float>(spout[i * 2]);
+        out[1][i] = static_cast<float>(spout[i * 2 + 1]);
     }
-    // Peak meter for render(): fast attack, slow decay. Single-float write, read in the main loop.
-    _level = (peak > _level) ? peak : _level * 0.90f;
     _gate.end_use();
 }
 
 Capabilities CsoundEngine::capabilities() const
 {
-    // CapAux: claim Alt+PITCH as the patch selector (ParamId::Aux). CapOwnDisplay: the engine draws
-    // the rings (level meter, and the selector while Alt is held).
-    return CapAux | CapOwnDisplay;
+    // CapAux: claim Alt+PITCH as the patch selector (ParamId::Aux).
+    return CapAux;
 }
 
 void CsoundEngine::set_param(ParamId id, DeckRef::Ref d, float v)
@@ -375,44 +365,4 @@ void CsoundEngine::set_aux_active(DeckRef::Ref d, bool held)
     _aux_held = held;
 }
 
-void CsoundEngine::render(DisplayModel& m)
-{
-    m.clear();
-    const bool running = (_gate.current() != nullptr);
-
-    // While Alt is held: the patch selector - one dot per selectable orchestra around each ring, the
-    // previewed one bright. (The built-in is index 0; SD slots follow.)
-    if (_aux_held) {
-        for (int i = 0; i < 2; i++) {
-            m.play[i] = { running ? 0x00ff00u : 0x000000u, running ? 1.f : 0.f };
-            m.ring[i].set_hex_color(0x00c0ff);          // patch-selector hue (cyan)
-            m.ring[i].set_segment(0.f, 0.999f);
-            for (int a = 0; a < _avail_n; a++) {
-                const float pos = (_avail_n <= 1) ? 0.f : static_cast<float>(a) / static_cast<float>(_avail_n);
-                m.ring[i].add_point(pos, (a == _sel_preview) ? 1.f : 0.18f);
-            }
-            m.ring[i].set_updated();
-        }
-        m.mode_center = { 0x00c0ffu, 0.6f };            // selector hue
-        return;
-    }
-
-    // Otherwise: the output level meter on both rings (green base, amber past -4 dBish, red near clip).
-    float lvl = _level;
-    if (lvl > 1.f) lvl = 1.f;
-    const uint32_t col = (lvl > 0.85f) ? 0xff2000u : (lvl > 0.60f) ? 0xffa000u : 0x00ff00u;
-    for (int i = 0; i < 2; i++) {
-        m.play[i] = { running ? 0x00ff00u : 0x000000u, running ? 1.f : 0.f };
-        m.ring[i].set_hex_color(0x0a0a0a);              // faint full base ring
-        m.ring[i].set_segment(0.f, 0.999f);
-        if (running && lvl > 0.02f) {                   // bright arc proportional to level
-            m.ring[i].set_hex_color(col);
-            m.ring[i].set_segment(0.f, lvl);
-        }
-        m.ring[i].set_updated();
-    }
-    // Centre mode LED tells the patch source: cyan = an SD slot, white = the built-in.
-    m.mode_center = { _patch_loaded ? 0x00c0ffu : 0xffffffu, 0.5f };
-}
-
-} // namespace spotykach
+} // namespace daisyapps

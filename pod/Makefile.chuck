@@ -18,12 +18,24 @@ APP_TYPE = BOOT_QSPI
 # -fno-exceptions/-fno-rtti. (-std=gnu++17 is also required: common.h's std::clamp needs C++17.)
 CPP_STANDARD = -std=gnu++17 -fexceptions -frtti
 
+# Target board for the control/UI abstraction (src/board/board.h). Default Pod; override on the
+# command line: `make -f Makefile.chuck BOARD=patch_init` / `BOARD=patch`. The board only changes a
+# -DTARGET_* define - all three targets are STM32H750, so the QSPI linker + bootloader are unchanged.
+BOARD ?= pod
+ifeq ($(BOARD),pod)
+C_DEFS += -DTARGET_POD
+else ifeq ($(BOARD),patch_init)
+C_DEFS += -DTARGET_PATCH_INIT
+else ifeq ($(BOARD),patch)
+C_DEFS += -DTARGET_PATCH
+else
+$(error unknown BOARD '$(BOARD)' - use one of: pod | patch_init | patch)
+endif
+
 TARGET      = harness_chuck
 CPP_SOURCES = harness_chuck.cpp \
               ../src/engine/chuck/chuck_engine.cpp \
-              ../src/engine/chuck/chuck_alloc.cpp \
-              ../src/engine/led.ring.cpp \
-              ../src/engine/color.cpp
+              ../src/engine/chuck/chuck_alloc.cpp
 
 # Daisy libraries (vendored in the sk-engines repo)
 LIBDAISY_DIR = ../libs/libDaisy

@@ -7,7 +7,7 @@
 
 #include "engine/mode.h"   // ClockSource (transport clock-source enum, contract-owned)
 
-namespace spotykach {
+namespace daisyapps {
 
 // Per-tick event the platform Transport fans out to whichever engine subscribed via
 // ITransport::set_on_tick. This is the engine-agnostic clock contract: a granular looper, a

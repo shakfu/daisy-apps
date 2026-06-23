@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace spotykach {
+namespace daisyapps {
 
 // Platform clock abstraction. The DSP core depends only on this interface, never on
 // libDaisy's daisy::System directly, so the same core can run on hardware or on a host.

@@ -33,7 +33,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace spotykach {
+namespace daisyapps {
 
 class CsoundPool {
 public:
@@ -272,4 +272,4 @@ private:
     Node*       _heads[kClasses] = {nullptr};
 };
 
-} // namespace spotykach
+} // namespace daisyapps

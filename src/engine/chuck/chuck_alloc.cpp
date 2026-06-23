@@ -44,7 +44,7 @@ namespace {
 // pool + ~2 MB stream rings + token arena ~= 42 MB of 64 MB.)
 constexpr size_t kPoolBytes = 40u * 1024u * 1024u;
 alignas(16) CHUCK_SDRAM_BSS std::uint8_t g_pool[kPoolBytes];
-spotykach::CsoundPool g_alloc;                        // the shared, engine-agnostic SDRAM allocator
+daisyapps::CsoundPool g_alloc;                        // the shared, engine-agnostic SDRAM allocator
 bool g_armed = false;
 
 inline bool in_pool(const void* p) {
@@ -63,7 +63,7 @@ struct CritSec {
 
 } // namespace
 
-namespace spotykach {
+namespace daisyapps {
 // Lay down the free pool over the SDRAM array and arm interception. Call once, after _hw.Init()
 // (SDRAM live), before `new ChucK()`.
 void chuck_heap_arm() noexcept {

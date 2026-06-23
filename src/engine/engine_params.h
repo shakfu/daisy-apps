@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace spotykach {
+namespace daisyapps {
 
 // Logical parameters an engine exposes to the platform. One physical control may map to
 // several of these (via modifier layers / mode), and a single ParamId may fan out to
@@ -81,8 +81,6 @@ enum Capability : uint32_t {
     CapLaunchQuant   = 1u << 3,
     CapTransport     = 1u << 4,
     CapDualDeck      = 1u << 5,
-    CapOwnDisplay    = 1u << 6,  // engine fills DisplayModel in render(); platform blits it directly
-                                 // (bypasses the granular *_leds/render_ring query path) - item 3b-2a
     CapAux           = 1u << 7,  // engine claims Alt+PITCH as a per-deck selector (ParamId::Aux);
                                  // without it Alt+PITCH keeps its default meaning (granular: pitch-quantize)
     CapAltPos        = 1u << 8,  // engine claims the Alt+POS knob layer (ParamId::AltPos); without it

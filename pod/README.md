@@ -1,13 +1,12 @@
 # Daisy Pod — Csound harness
 
 A standalone, quick-iteration target that runs the real `CsoundEngine` on a bare **Daisy** (Pod /
-Seed), without the spotykach platform and front panel. A Pod is faster to flash and poke at than the
-full firmware, so this is a handy sandbox for working on Csound synthesis, opcodes, and CPU behaviour
-before changes land in the actual engine.
+Seed), without the host firmware platform and front panel. A Pod is faster to flash and poke at than
+the full firmware, so this is a handy sandbox for working on Csound synthesis, opcodes, and CPU
+behaviour before changes land in the actual engine.
 
-**This is not part of the spotykach firmware** and is **not** covered by `make test`. The shipping
-engine lives in `src/engine/csound/` and is built with `make engine-csound` (see
-[`docs/engines/csound.md`](../docs/engines/csound.md) and [`docs/dev/csound-impl.md`](../docs/dev/csound-impl.md)).
+This harness is **not** shipping firmware - it builds the engine sources vendored in
+`src/engine/csound/` purely as a fast hardware sandbox for synthesis and CPU work.
 
 ## What it does
 
@@ -55,16 +54,20 @@ The Makefiles' `../src`, `../libs/{libDaisy,DaisySP}`, and `../thirdparty/{csoun
 this directory sits at the repo root (one level deep) — keep it there. (In sk-engines the Daisy libs
 lived at `../lib`; here they are the vendored `../libs` tree, the only path that changed.)
 
-## Two important differences from the spotykach build
+## Bootloader & heap notes
 
-1. **It replaces the bootloader.** The harness uses the stock **Daisy v5.4** bootloader
-   (`dsy_bootloader_v5_4.bin`) and the Csound-port QSPI linker script. Flashing it **overwrites the
-   spotykach bootloader** — reflash the spotykach bootloader to go back to the SRAM engines.
+1. **Bootloader.** Both harnesses are `BOOT_QSPI` apps loaded at the standard Daisy app base
+   (`0x90040000`), so any QSPI-capable bootloader boots them (the ChucK harness also re-injects VTOR
+   itself). `make program-dfu` / `program-swd` flash only the app and leave the bootloader alone;
+   `make program-boot` (re)flashes a bootloader and **overwrites whatever bootloader is on the board**.
+   For `program-boot` the Csound Makefile uses the stock **Daisy v5.4** image (`dsy_bootloader_v5_4.bin`,
+   from the fetched Csound Daisy port) and the ChucK Makefile falls back to libDaisy's bundled stock
+   bootloader (`dsy_bootloader_v6_2-intdfu-2000ms.bin`). No project-specific bootloader is vendored.
 
-2. **Different heap model.** The Pod puts Csound's heap straight in SDRAM via the port's
-   `STM32H750IB_qspi_custom.lds` (newlib `malloc`). The spotykach build instead uses the dual-heap
-   free-capable pool (`csound_alloc.cpp` + `--wrap`). So `csound_heap_arm()` is a **no-op** here
-   (defined in `harness.cpp`), and the allocator tests/notes don't apply to this target.
+2. **Heap model.** The Pod puts Csound's heap straight in SDRAM via the port's
+   `STM32H750IB_qspi_custom.lds` (newlib `malloc`), so `csound_heap_arm()` is a **no-op** here
+   (defined in `harness_csound.cpp`). The ChucK harness routes ChucK's C-malloc family into the SDRAM
+   `--wrap` pool (`chuck_alloc.cpp`) via `alt_qspi_chuck.lds`.
 
 ## Caveat
 

@@ -9,7 +9,7 @@
 #include "engine/itransport.h"
 #include "engine/istreamdeck.h"
 
-namespace spotykach {
+namespace daisyapps {
 
 // An opaque block of SDRAM the platform hands the engine to sub-allocate however it likes (via
 // engine/arena.h's Arena). The engine owns its own buffer layout; the platform/HAL provides only

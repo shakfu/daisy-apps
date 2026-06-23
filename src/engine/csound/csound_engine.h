@@ -10,7 +10,7 @@
 // SKETCH (2026-06): CsoundEngine wraps a Csound 7 instance behind IEngine. It builds ONLY in the
 // QSPI firmware target - code in QSPI flash, heap in SDRAM (the Csound port's custom linker script),
 // stock Daisy v5.4 bootloader, linked against libcsound.a. It CANNOT link into the SRAM engine
-// bundle: ~2 MB of code vs the 186 KB SRAM_EXEC budget, and the spotykach board only boots SRAM.
+// bundle: ~2 MB of code vs the 186 KB SRAM_EXEC budget, and the SRAM firmware target only boots SRAM.
 // See docs/dev/csound-impl.md for the why and the build recipe.
 //
 // The mapping onto IEngine is small and clean:
@@ -26,7 +26,7 @@
 // (csound.h is included only in the .cpp, which exists only in the QSPI build).
 typedef struct CSOUND_ CSOUND;
 
-namespace spotykach {
+namespace daisyapps {
 
 class CsoundEngine : public IEngine {
 public:
@@ -44,14 +44,9 @@ public:
     // scheduled in process(). NoteOn only - no NoteOff/velocity, so notes are finite (csound_midi.h).
     DeckRef::Ref handle_midi_note(uint8_t channel, uint8_t note) override;
 
-    // Alt+PITCH (CapAux) held on deck A: the patch selector. set_param(Aux) previews; this drives the
-    // selector display + (on the held->release edge) commits a live recompile in prepare().
+    // Alt+PITCH (CapAux) held on deck A: the patch selector. set_param(Aux) previews; this commits a
+    // live recompile in prepare() on the held->release edge.
     void set_aux_active(DeckRef::Ref d, bool active) override;
-
-    // --- panel feedback -------------------------------------------------------------------------
-    // Rings show the output level meter (or, while Alt is held, the patch selector); Play LEDs show
-    // running state; the centre mode LED shows the patch source (cyan = SD, white = built-in).
-    void render(DisplayModel& m) override;
 
 private:
     // Create + configure + compile `text` (a CSD) + start; returns the new instance (caller publishes
@@ -75,7 +70,6 @@ private:
     float        _sr     = 48000.f;
     int          _ksmps  = 0;           // == block size; guards the process() copy (see publish order)
     int          _midi_instr = 0;       // Csound instr number of "MidiNote" (0 => MIDI notes dropped)
-    float        _level  = 0.f;         // output peak meter (written in process(), read in render())
     bool         _patch_loaded = false; // true => running an SD slot; false => the built-in
 
     NoteQueue<32> _notes;               // pending MIDI notes: main loop pushes, process() (ISR) drains
@@ -102,4 +96,4 @@ private:
     float _cache[kSlots] = {0.f};
 };
 
-} // namespace spotykach
+} // namespace daisyapps

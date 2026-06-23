@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace spotykach {
+namespace daisyapps {
 
 // The A/B deck (channel) selector the platform and IEngine speak. Contract-owned (item 5b) so the
 // interface no longer pulls the granular `core/deck.h` for it. Kept an UNSCOPED enum so it still

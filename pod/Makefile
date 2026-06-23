@@ -5,9 +5,9 @@
 #   make            - build the harness (CsoundEngine behind IEngine)
 #   make program-dfu- flash over USB DFU (catch the v5.4 bootloader's DFU window)
 #
-# NOTE: this uses the stock Daisy bootloader (dsy_bootloader_v5_4.bin), not the
-# spotykach SRAM bootloader. Flashing it replaces the bootloader; reflash the
-# spotykach bootloader to go back to the SRAM engines.
+# NOTE: program-dfu/program-swd flash only the app. `make program-boot` flashes the
+# stock Daisy v5.4 bootloader (dsy_bootloader_v5_4.bin, from the fetched Csound Daisy
+# port) and overwrites whatever bootloader is currently on the board.
 
 APP_TYPE = BOOT_QSPI
 LDFLAGS += -u _printf_float
@@ -15,13 +15,22 @@ LDFLAGS += -u _printf_float
 # The sk-engines contract headers (common.h: std::clamp) need C++17; libDaisy defaults to gnu++14.
 CPP_STANDARD = -std=gnu++17
 
+# Target board for the control/UI abstraction (src/board/board.h). Default Pod; override on the
+# command line: `make BOARD=patch_init` / `make BOARD=patch`. The board only changes a -DTARGET_*
+# define - all three targets are STM32H750, so the QSPI linker script + bootloader are unchanged.
+BOARD ?= pod
+ifeq ($(BOARD),pod)
+C_DEFS += -DTARGET_POD
+else ifeq ($(BOARD),patch_init)
+C_DEFS += -DTARGET_PATCH_INIT
+else ifeq ($(BOARD),patch)
+C_DEFS += -DTARGET_PATCH
+else
+$(error unknown BOARD '$(BOARD)' - use one of: pod | patch_init | patch)
+endif
+
 TARGET      = harness
-# csound_engine.cpp renders into a DisplayModel/LEDRing, so it needs led.ring.cpp + color.cpp
-# (added later than the original harness Makefile; without them the link fails on LEDRing::* symbols).
-CPP_SOURCES = harness_csound.cpp \
-              ../src/engine/csound/csound_engine.cpp \
-              ../src/engine/led.ring.cpp \
-              ../src/engine/color.cpp
+CPP_SOURCES = harness_csound.cpp ../src/engine/csound/csound_engine.cpp
 
 # Daisy libraries (vendored in the sk-engines repo)
 LIBDAISY_DIR = ../libs/libDaisy

@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace spotykach {
+namespace daisyapps {
 
 // Platform streaming service, injected into the engine via EngineContext (like ITransport). Lets an
 // engine play arbitrarily long files from SD and record arbitrarily long takes to SD, bypassing the
@@ -83,4 +83,4 @@ struct IStreamDeck {
     virtual int      read_text(const char* /*path*/, char* /*buf*/, int /*max*/) const { return 0; }
 };
 
-} // namespace spotykach
+} // namespace daisyapps

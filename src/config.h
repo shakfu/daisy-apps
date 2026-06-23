@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <algorithm>
 
-namespace spotykach {
+namespace daisyapps {
 
 class Config
 {

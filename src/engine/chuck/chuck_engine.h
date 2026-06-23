@@ -16,7 +16,6 @@
 //   init()      -> new ChucK / setParam(SR/INPUT/OUTPUT_CHANNELS) / init() / compileCode(program)
 //   process()   -> interleave in -> ck->run(in,out,n) (SAMPLE=float) -> de-interleave out
 //   set_param() -> globals()->setGlobalFloat(name, value)   (the .ck program reads the global)
-//   render()    -> output-level meter on the rings
 // The ChucK program (the .ck text) defines the synthesis AND the control vocabulary; the platform's
 // knobs drive whichever globals the program declares (speedA/mixA/sizeA/... - see channel_for()).
 //
@@ -35,7 +34,7 @@
 class ChucK;
 class Chuck_VM_Code;
 
-namespace spotykach {
+namespace daisyapps {
 
 class ChuckEngine : public IEngine {
 public:
@@ -49,14 +48,9 @@ public:
     void         set_param(ParamId id, DeckRef::Ref d, float v) override;
     float        param(ParamId id, DeckRef::Ref d) const override;
 
-    // Alt+PITCH (CapAux) held on deck A: the patch selector. set_param(Aux) previews; this drives the
-    // selector display + (on the held->release edge) commits a live recompile in prepare().
+    // Alt+PITCH (CapAux) held on deck A: the patch selector. set_param(Aux) previews; this commits a
+    // live recompile in prepare() on the held->release edge.
     void         set_aux_active(DeckRef::Ref d, bool active) override;
-
-    // --- panel feedback -------------------------------------------------------------------------
-    // Rings show the output level meter (or, while Alt is held, the patch selector); Play LEDs show
-    // running state; the centre mode LED shows the program source (cyan = an SD slot, white = built-in).
-    void render(DisplayModel& m) override;
 
 private:
     // Build the ONE persistent ChucK VM: new ChucK / setParam / init / start - NO program compiled yet
@@ -102,8 +96,6 @@ private:
     float  _block = 256.f;          // platform block size; == run() numFrames per process() call
     int    _in_ch  = 2;
     int    _out_ch = 2;
-    float  _peak_l = 0.f, _peak_r = 0.f;  // per-channel output peak (fast attack, slow decay)
-    float  _rms_l  = 0.f, _rms_r  = 0.f;  // per-channel output RMS (smoothed) - the loudness meter
     bool   _patch_loaded = false;   // true => running an SD slot; false => the built-in
 
     // --- compile-once cache (the leak fix) -------------------------------------------------------
@@ -117,12 +109,12 @@ private:
     Chuck_VM_Code* _builtin_code = nullptr;
     Chuck_VM_Code* _slot_code[kMaxChuckSlots] = {nullptr};
 
-    // --- patch-swap leak instrumentation (always built; the panel readout is METER-gated) ----------
+    // --- patch-swap leak instrumentation -----------------------------------------------------------
     // Live SDRAM pool usage, sampled once per swap by note_pool_usage() with the ISR quiesced (so the
-    // used_bytes() walk is race-free and off the hot path). render() (METER) draws _pool_used as ring B's
-    // arc and _pool_used_peak as a high-water dot: climbing together across swaps = a leak; arc falling
-    // back while the dot stays high = fragmentation (used recovered, the failure is elsewhere). Also
-    // mirrored to g_chuck_pool_* for SWD readout on the bare Pod.
+    // used_bytes() walk is race-free and off the hot path). Mirrored to the g_chuck_pool_* globals for
+    // SWD readout on the bare Pod: _pool_used climbing together with _pool_used_peak across swaps = a
+    // leak; the used value falling back while the peak stays high = fragmentation (used recovered, the
+    // failure is elsewhere).
     size_t _pool_used      = 0;
     size_t _pool_used_peak = 0;
     size_t _pool_cap       = 0;
@@ -171,4 +163,4 @@ private:
     float _cache[kSlots] = {0.f};
 };
 
-} // namespace spotykach
+} // namespace daisyapps

@@ -23,7 +23,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace spotykach {
+namespace daisyapps {
 
 // The well-known instrument name a patch defines to be MIDI-playable. The engine looks it up with
 // csoundGetInstrNumber; a patch that doesn't define it simply isn't keyboard-playable (NoteOns are
@@ -91,4 +91,4 @@ private:
     std::atomic<uint32_t> _tail{0};
 };
 
-} // namespace spotykach
+} // namespace daisyapps

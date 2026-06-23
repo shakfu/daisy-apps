@@ -38,7 +38,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace spotykach {
+namespace daisyapps {
 
 // Number of numbered patch slots probed on the card (/chuck/0.ck .. /chuck/<N-1>.ck).
 inline constexpr int kMaxChuckSlots = 8;
@@ -115,4 +115,4 @@ inline const char* read_program(IStreamDeck* stream, const char* path, char* buf
     return start;
 }
 
-} // namespace spotykach
+} // namespace daisyapps

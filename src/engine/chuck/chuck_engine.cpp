@@ -20,10 +20,6 @@
 #include "chuck_vm.h"         // Chuck_VM::spork (re-spork cached code) + Chuck_VM_Code (the cached bytecode)
 #include "chuck_compile.h"    // Chuck_Compiler::output() - the just-emitted code to pin in the cache
 
-#ifdef METER
-#include "meter.h"            // Meter::cpu().load - the platform's whole-callback CpuLoadMeter, driven
-                             // by app.cpp's OnBlockStart/OnBlockEnd. The on-panel meter reads it in render().
-#endif
 
 #include <cstdlib>            // malloc/free (routed to the SDRAM pool by chuck_alloc.cpp's --wrap)
 #include <cstdio>             // snprintf - format the bring-up error capture
@@ -44,7 +40,7 @@
 #define CHUCK_RUNTIME_LEVEL 0
 #endif
 
-namespace spotykach {
+namespace daisyapps {
 
 // Arms the SDRAM pool for ChucK's allocations (chuck_alloc.cpp). Called after _hw.Init() (so SDRAM is
 // live), before `new ChucK()`. No-op-safe if the --wrap allocator isn't linked.
@@ -109,19 +105,6 @@ static const ParamId kMappedParams[] = {
 // room. It is malloc'd from the (armed) SDRAM pool, used only during compile, then freed.
 static constexpr int kPatchMax = 64 * 1024;
 
-// Map a linear amplitude (0..1, where 1.0 = 0 dBFS) to a 0..1 ring position on a dB scale
-// (kMeterFloorDb .. 0 dB). A linear ring barely moves for musical signal - everything crowds the
-// bottom - so the level meter uses dB to read like a real meter. Returns 0 at/below the floor, 1 at or
-// above 0 dBFS. (The CPU meter stays linear: it is a fraction of the block budget, not a signal level.)
-static inline float meter_db_norm(float amp)
-{
-    constexpr float kMeterFloorDb = -60.f;
-    if (amp <= 0.f) return 0.f;
-    const float db = 20.f * std::log10(amp);
-    if (db <= kMeterFloorDb) return 0.f;
-    if (db >= 0.f)           return 1.f;
-    return (db - kMeterFloorDb) / -kMeterFloorDb;   // (db + 60) / 60
-}
 
 // --- Bring-up crash capture (QSPI Pod debug; see docs/dev/chuck-pod-poc.md) -------------------
 // On bare metal an uncaught C++ exception out of ChucK init runs std::terminate -> abort, which spins
@@ -136,7 +119,7 @@ char              g_chuck_init_error[192] = "";   // cause on failure ("" if non
 // Patch-swap leak instrumentation. note_pool_usage() refreshes these once per swap (and at init), with
 // the ISR quiesced. A used_kb that climbs monotonically across swaps (never recovering) is the ChucK
 // per-VM type-system leak (chuck-impl.md root cause). Read over SWD on the bare Pod (mdw the addresses
-// from build/spotykach.map); the cased unit reads the same figure off the panel in a METER build.
+// from the firmware's build .map); the cased unit reads the same figure off the panel in a METER build.
 volatile uint32_t g_chuck_pool_used_kb = 0;   // live pool usage right after the last swap
 volatile uint32_t g_chuck_pool_peak_kb = 0;   // high-water mark across all swaps (only rises on a leak)
 volatile uint32_t g_chuck_pool_cap_kb  = 0;   // pool capacity (constant once armed)
@@ -453,10 +436,6 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
     // overrunning real-time - skipping run() frees the CPU so the main loop + selector stay alive).
     if (!ck || !_inbuf || !_outbuf || _panic) {
         for (size_t i = 0; i < size; i++) { out[0][i] = 0.f; out[1][i] = 0.f; }
-        _peak_l *= 0.90f;                         // let the meters decay while silent
-        _peak_r *= 0.90f;
-        _rms_l  *= 0.90f;
-        _rms_r  *= 0.90f;
         _last_entry = entry;
         _gate.end_use();
         return;
@@ -478,28 +457,10 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
     ck->run(_inbuf, _outbuf, static_cast<long>(n));
     const uint32_t run_cycles = DWT->CYCCNT - run0;
 
-    // Per-channel output metering for render() - peak (max abs) and RMS (sum-of-squares -> sqrt), L and
-    // R separately, the same quantities numchuck's get_audio_meters exposes (here shown on the rings).
-    float pl = 0.f, pr = 0.f, sl = 0.f, sr = 0.f;
     for (size_t i = 0; i < n; i++) {              // interleaved _outbuf -> de-interleaved out
-        const float l = _outbuf[i * 2];
-        const float r = _outbuf[i * 2 + 1];
-        out[0][i] = l;
-        out[1][i] = r;
-        const float a = (l < 0 ? -l : l), b = (r < 0 ? -r : r);
-        if (a > pl) pl = a;
-        if (b > pr) pr = b;
-        sl += l * l;
-        sr += r * r;
+        out[0][i] = _outbuf[i * 2];
+        out[1][i] = _outbuf[i * 2 + 1];
     }
-    const float inv = (n > 0) ? 1.f / static_cast<float>(n) : 0.f;
-    const float rl = std::sqrt(sl * inv);
-    const float rr = std::sqrt(sr * inv);
-    // Single-float writes, read in the main loop (render). Peak: fast attack, slow decay. RMS: smoothed.
-    _peak_l = (pl > _peak_l) ? pl : _peak_l * 0.90f;
-    _peak_r = (pr > _peak_r) ? pr : _peak_r * 0.90f;
-    _rms_l += 0.25f * (rl - _rms_l);
-    _rms_r += 0.25f * (rr - _rms_r);
 
     // CPU-overrun safeguard. Learn the true block period (the minimum inter-block gap: under overrun the
     // gap inflates, so the min converges to the real period and corrects the 480 MHz estimate). If run()
@@ -518,9 +479,8 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
 
 Capabilities ChuckEngine::capabilities() const
 {
-    // CapAux: claim Alt+PITCH as the patch selector (ParamId::Aux). CapOwnDisplay: the engine draws
-    // the rings (level meter, and the selector while Alt is held).
-    return CapAux | CapOwnDisplay;
+    // CapAux: claim Alt+PITCH as the patch selector (ParamId::Aux).
+    return CapAux;
 }
 
 void ChuckEngine::set_param(ParamId id, DeckRef::Ref d, float v)
@@ -565,113 +525,4 @@ void ChuckEngine::set_aux_active(DeckRef::Ref d, bool held)
     _aux_held = held;
 }
 
-void ChuckEngine::render(DisplayModel& m)
-{
-    m.clear();
-    const bool running = (_gate.current() != nullptr);
-
-    // While Alt is held: the patch selector - one dot per selectable program around each ring, the
-    // previewed one bright. (The built-in is index 0; SD slots follow.) Same look as CsoundEngine.
-    if (_aux_held) {
-        for (int i = 0; i < 2; i++) {
-            m.play[i] = { running ? 0x00ff00u : 0x000000u, running ? 1.f : 0.f };
-            m.ring[i].set_hex_color(0x00c0ff);          // patch-selector hue (cyan)
-            m.ring[i].set_segment(0.f, 0.999f);
-            for (int a = 0; a < _avail_n; a++) {
-                const float pos = (_avail_n <= 1) ? 0.f : static_cast<float>(a) / static_cast<float>(_avail_n);
-                m.ring[i].add_point(pos, (a == _sel_preview) ? 1.f : 0.18f);
-            }
-            m.ring[i].set_updated();
-        }
-        m.mode_center = { 0x00c0ffu, 0.6f };            // selector hue
-        return;
-    }
-
-    // CPU-overrun mute: this patch overran real-time and was silenced to keep the controls alive. Solid
-    // red rings + red centre so the user knows to Alt+PITCH to another patch (which clears the panic).
-    // After the selector branch above, so the selector still draws/works as the escape route.
-    if (_panic) {
-        for (int i = 0; i < 2; i++) {
-            m.play[i] = { 0xff0000u, 1.f };
-            m.ring[i].set_hex_color(0xff0000);
-            m.ring[i].set_segment(0.f, 0.999f);
-            m.ring[i].set_updated();
-        }
-        m.mode_center = { 0xff0000u, 0.8f };
-        return;
-    }
-
-#ifdef METER
-    // On-panel CPU + pool meter (build: make engine-chuck METER=1) - the patch-swap leak readout for the
-    // cased unit (no SWD access). Ring A = CPU load (the overrun symptom). Ring B = SDRAM pool usage:
-    // arc = bytes live right after the last swap, dot = the high-water mark. Swap patches repeatedly and
-    // watch ring B: arc + dot climbing together and never recovering = the ChucK per-VM type-system leak;
-    // arc falling back while the dot stays high = used recovered (fragmentation, failure is elsewhere).
-    // The same METER flag also streams CPU load over USB CDC (app.cpp). See docs/dev/chuck-impl.md.
-    {
-        float avg = Meter::cpu().load.GetAvgCpuLoad();
-        float pk  = Meter::cpu().load.GetMaxCpuLoad();
-        if (avg < 0.f) avg = 0.f;
-        if (avg > 1.f) avg = 1.f;
-        if (pk  < 0.f) pk  = 0.f;
-        if (pk  > 1.f) pk  = 1.f;
-        const uint32_t col = (pk > 0.85f) ? 0xff2000u : (pk > 0.60f) ? 0xffa000u : 0x00ff00u;
-
-        // Ring A (deck A) = CPU load. Faint base ring = the full block budget; the bright arc = current
-        // average load; the dot = the peak (max) load; the colour = peak severity (green/amber/red,
-        // red >= 85% = at/over budget -> dropouts; max latches, so one overrun stays visible).
-        m.play[0] = { running ? 0x00ff00u : 0x000000u, running ? 1.f : 0.f };
-        m.ring[0].set_hex_color(0x0a0a0a);
-        m.ring[0].set_segment(0.f, 0.999f);
-        if (avg > 0.01f) { m.ring[0].set_hex_color(col); m.ring[0].set_segment(0.f, avg); }
-        m.ring[0].add_point(pk, 1.f);
-        m.ring[0].set_updated();
-
-        // Ring B (deck B) = SDRAM pool usage as a fraction of capacity. Bright arc = bytes live right
-        // after the last swap (_pool_used); dot = the high-water mark (_pool_used_peak). Both are sampled
-        // once per swap by note_pool_usage() with the ISR gated - NOT walked here per render (that walk-
-        // under-PRIMASK was the old observer-effect bug). Colour by fill severity. A leak drives arc + dot
-        // up together every swap and they never fall; fragmentation drops the arc but leaves the dot high.
-        const float cap   = (_pool_cap > 0) ? static_cast<float>(_pool_cap) : 1.f;
-        float used_frac = static_cast<float>(_pool_used)      / cap;
-        float peak_frac = static_cast<float>(_pool_used_peak) / cap;
-        if (used_frac > 1.f) used_frac = 1.f;
-        if (peak_frac > 1.f) peak_frac = 1.f;
-        const uint32_t pcol = (used_frac > 0.85f) ? 0xff2000u : (used_frac > 0.60f) ? 0xffa000u : 0x00ff00u;
-        m.play[1] = { running ? 0x00ff00u : 0x000000u, running ? 1.f : 0.f };
-        m.ring[1].set_hex_color(0x0a0a0a);                 // faint base = full pool capacity (the scale)
-        m.ring[1].set_segment(0.f, 0.999f);
-        if (used_frac > 0.001f) { m.ring[1].set_hex_color(pcol); m.ring[1].set_segment(0.f, used_frac); }
-        m.ring[1].add_point(peak_frac, 1.f);               // high-water dot
-        m.ring[1].set_updated();
-
-        m.mode_center = { 0xff00ffu, 0.6f };               // magenta = meter mode (vs the source LED)
-        return;
-    }
-#endif
-
-    // Per-channel output level meter: ring A = left, ring B = right. The bright arc is RMS (loudness),
-    // a dot marks the peak; colour by peak severity (green base, amber past ~-4 dB, red near clip). This
-    // is numchuck's per-channel RMS+peak metering, drawn on the two rings instead of returned as values.
-    const float rms[2]  = { _rms_l,  _rms_r  };
-    const float peak[2] = { _peak_l, _peak_r };
-    for (int i = 0; i < 2; i++) {
-        const float a = meter_db_norm(rms[i]);         // RMS  -> dB ring position (loudness arc)
-        const float p = meter_db_norm(peak[i]);        // peak -> dB ring position (marker)
-        // Colour by peak on the dB scale: red near 0 dBFS (>= -3 dB), amber from ~-12 dB, else green.
-        const uint32_t col = (p > 0.95f) ? 0xff2000u : (p > 0.80f) ? 0xffa000u : 0x00ff00u;
-        m.play[i] = { running ? 0x00ff00u : 0x000000u, running ? 1.f : 0.f };
-        m.ring[i].set_hex_color(0x0a0a0a);              // faint full base ring
-        m.ring[i].set_segment(0.f, 0.999f);
-        if (running && a > 0.001f) {                    // bright arc proportional to RMS (dB)
-            m.ring[i].set_hex_color(col);
-            m.ring[i].set_segment(0.f, a);
-        }
-        if (running && p > 0.001f) m.ring[i].add_point(p, 1.f);   // peak marker (dB)
-        m.ring[i].set_updated();
-    }
-    // Centre mode LED tells the program source: cyan = an SD slot, white = the built-in.
-    m.mode_center = { _patch_loaded ? 0x00c0ffu : 0xffffffu, 0.5f };
-}
-
-} // namespace spotykach
+} // namespace daisyapps

@@ -31,7 +31,7 @@
 
 #include <atomic>
 
-namespace spotykach {
+namespace daisyapps {
 
 class ReloadGate {
 public:
@@ -65,4 +65,4 @@ private:
     std::atomic<bool>  _busy{false};
 };
 
-} // namespace spotykach
+} // namespace daisyapps
