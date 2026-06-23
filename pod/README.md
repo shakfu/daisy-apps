@@ -58,7 +58,9 @@ plays each patch's `instr MidiNote`. ChucK's own `MidiIn` is compiled out of thi
 int array (`notesA`) + count (`noteCountA`) and one broadcast `noteOnA` Event a `.ck` program waits on,
 sporking a voice per note - so chords play **polyphonically**. The generic note ring + note->Hz map live
 in `src/engine/midi_note.h`, shared by both engines. See the `examples/*/README.md` for the per-engine
-note conventions.
+note conventions, and [`../docs/dev/chuck-midi-in.md`](../docs/dev/chuck-midi-in.md) for a design note on
+re-introducing real ChucK `MidiIn` (a custom thread-free backend) if the full MIDI vocabulary is ever
+needed.
 
 Both harnesses wire the SD patch bank the same way: `harness_chuck.cpp` injects the same
 `SdStreamDeck` for a `chuck/0.ck` .. `chuck/7.ck` bank with the identical encoder selector. Its one

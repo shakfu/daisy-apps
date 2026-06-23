@@ -45,7 +45,8 @@ under **Unreleased**.
   one broadcast Event (`noteOnA`/`noteOnB`), so a patch can spork a voice per note and chords play
   **polyphonically**. The generic note ring + note->Hz map moved to a shared `src/engine/midi_note.h`
   (used by both engines). NoteOn-only (finite, self-terminating voices); a `examples/chuck/midi.ck`
-  reference patch shows the ChucK convention.
+  reference patch shows the ChucK convention. `docs/dev/chuck-midi-in.md` captures a design note on
+  re-introducing real ChucK `MidiIn` (the bridge was a deliberate choice over it).
 - Example patch banks under `examples/` (`examples/csound/0.csd` .. `6.csd`,
   `examples/chuck/0.ck` .. `7.ck`), each with a README adapted to the Pod harness (encoder selector,
   no MIDI, only PITCH + MIX driven). `make sd-card SD=/Volumes/<card>` (a thin
