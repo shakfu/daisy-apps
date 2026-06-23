@@ -18,6 +18,8 @@ A small collection of apps for the [Electrosmith Daisy](https://www.electro-smit
 
 - `alt_qspi_chuck.lds` — QSPI linker script for the ChucK harness. (The Csound harness uses the linker script that ships inside the fetched Csound Daisy port.) Bootloader flashing uses stock images — libDaisy's bundled bootloader for ChucK, the Csound port's v5.4 for Csound — so none is vendored.
 
+- [`CHANGELOG.md`](CHANGELOG.md) — notable changes since the initial commit ([Keep a Changelog](https://keepachangelog.com/) format).
+
 ## Targets (control/UI abstraction)
 
 The harnesses talk to the hardware through a small board abstraction (`src/board/`) rather than a specific BSP, so the same engine/harness logic can run on different Daisy targets:
