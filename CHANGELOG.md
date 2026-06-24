@@ -47,6 +47,17 @@ under **Unreleased**.
   (used by both engines). NoteOn-only (finite, self-terminating voices); a `examples/chuck/midi.ck`
   reference patch shows the ChucK convention. `docs/dev/chuck-midi-in.md` captures a design note on
   re-introducing real ChucK `MidiIn` (the bridge was a deliberate choice over it).
+- Real ChucK `MidiIn` on the bare-metal build (prototype; build-verified, on-hardware wake test
+  pending). `libchuck.a` is now compiled with the `MidiIn`/`MidiOut` device classes enabled
+  (`__DISABLE_MIDI__` dropped from `scripts/fetch_chuck.sh` and `pod/Makefile.chuck`), but with
+  `midiio_rtmidi`'s RtMidi backend stripped - there is no OS MIDI API or callback thread on bare metal,
+  and `rtmidi.cpp` (166 KB) stays out. A new `MidiInManager::inject()` feeds bytes straight into ChucK's
+  per-VM MIDI buffer + event-wake path, so a patch can use the desktop-portable
+  `MidiIn min; min.recv(msg);` idiom (`examples/chuck/midi_in.ck`). `ChuckEngine::process()` injects each
+  incoming NoteOn into device 0 alongside the global bridge. The vendored-source edits live in
+  `scripts/patches/midi_daisy.patch`, applied idempotently by `scripts/fetch_chuck.sh` (because
+  `thirdparty/chuck` is gitignored and regenerated). See `docs/dev/chuck-midi-in.md` for status, the
+  retired wake-path risk, and known limitations (NoteOn-only, fixed velocity for now).
 - Example patch banks under `examples/` (`examples/csound/0.csd` .. `6.csd`,
   `examples/chuck/0.ck` .. `7.ck`), each with a README adapted to the Pod harness (encoder selector,
   no MIDI, only PITCH + MIX driven). `make sd-card SD=/Volumes/<card>` (a thin

@@ -478,6 +478,13 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
         while (_notes.pop(ev)) {
             const int d = (ev.deck == 0) ? 0 : 1;
             if (n[d] < kMaxBlockNotes) batch[d][n[d]++] = ev.note;
+            // Also feed the re-introduced ChucK MidiIn device (virtual UART = device 0): a patch using
+            // `MidiIn min; min.recv(msg)` sees these as NoteOn messages (status NoteOn|deck, note, a
+            // fixed velocity - the bridge ring carries no velocity). This coexists with the global
+            // bridge above; injecting here (same thread as run(), right before it) means a shred blocked
+            // on `min => now` is woken by ck->run() this block. See docs/dev/chuck-midi-in.md.
+            MidiInManager::inject(0, static_cast<t_CKBYTE>(MIDI_NOTEON | d),
+                                  static_cast<t_CKBYTE>(ev.note), static_cast<t_CKBYTE>(100));
         }
         for (int d = 0; d < 2; d++) {
             if (n[d] == 0) continue;

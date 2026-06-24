@@ -1,7 +1,47 @@
 # Design: re-introducing ChucK `MidiIn` on the Daisy build
 
-Status: proposal / not started. This captures the design initiative discussed while wiring MIDI into
-the Pod harnesses. It is a feasibility analysis and a plan, not an implemented feature.
+Status: **prototype implemented (build verified, hardware wake test pending).** The plan below was
+executed: `libchuck.a` is rebuilt with the `MidiIn`/`MidiOut` device classes enabled and a thread-free,
+RtMidi-stripped backend, and the engine feeds incoming NoteOns into `MidiIn` (device 0). The library,
+the internal link-test, and the Pod harness all build and link with matching ABI. What remains is the
+on-hardware confirmation that a shred blocked on `min => now` actually wakes and `min.recv()` drains
+(step 4 / Risks) - see [Implementation status](#implementation-status).
+
+## Implementation status
+
+What was done (all build-verified; see the [References](#references) for the touched files):
+
+- **Build flags / sources** (`scripts/fetch_chuck.sh`): dropped `__DISABLE_MIDI__`, added
+  `midiio_rtmidi` to the compiled set, kept `rtmidi.cpp` out. A committed patch
+  (`scripts/patches/midi_daisy.patch`, applied idempotently by the fetch script) carries the
+  vendored-source edits, since `thirdparty/chuck` is gitignored and regenerated from upstream.
+- **RtMidi stub** (`midiio_rtmidi.{h,cpp}`): removed every `RtMidiIn`/`RtMidiOut` backend call;
+  `MidiInManager::open` now registers a single virtual UART device, and a new
+  `MidiInManager::inject(device, status, d1, d2)` feeds bytes through the existing
+  `cb_midi_input -> CBufferAdvance::put` path. `MidiOut` is registered but inert (open always fails).
+  `RtMidiIn`/`RtMidiOut` are reduced to minimal stand-ins (only `getPortName()` is referenced, by
+  `MidiIn.name()`).
+- **ABI sync** (`pod/Makefile.chuck`): dropped `__DISABLE_MIDI__` to match the archive.
+- **Host feed** (`src/engine/chuck/chuck_engine.cpp`): `process()` injects each NoteOn into device 0
+  (status `NoteOn|deck`, note, fixed velocity 100) right before `ck->run()`, alongside the existing
+  global bridge. Same thread as `run()`, so it can't race a shred's `min.open()`.
+- **Example** (`examples/chuck/midi_in.ck`): opens `MidiIn`, blocks on `min => now`, drains with
+  `min.recv(msg)`, sporks a voice per NoteOn - the desktop-portable idiom.
+
+**The highest documented risk is now largely retired by evidence:** the shipped global bridge already
+broadcasts a `Chuck_Event` from the run() thread under `__DISABLE_THREADS__` and a shred waiting on it
+resumes (`chuck_engine.cpp` `broadcastGlobalEvent` + `examples/chuck/midi.ck` `noteOnA => now`). The
+`MidiIn` path reuses the same per-VM event-buffer machinery, so the remaining hardware test is
+confirmation, not discovery.
+
+Known limitations of the prototype: NoteOn only with a fixed velocity (the bridge ring carries no
+velocity), and `MidiIn` injection is fed from the lossy note ring rather than directly from the parsed
+UART (so CC/pitch-bend are not yet delivered). Forwarding the full `MidiUartHandler` stream into
+`inject()` is the natural follow-up once the wake is confirmed.
+
+---
+
+The original feasibility analysis and plan follow.
 
 ## Summary
 
