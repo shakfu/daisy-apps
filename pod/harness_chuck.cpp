@@ -119,9 +119,10 @@ int main(void)
     while (1) {
         board.Poll(controls);
 
-        // MIDI NoteOn -> the patch's note Event + frequency global (channel -> deck, note -> Hz).
-        // handle_midi_note only enqueues here; the audio ISR drains and delivers to the VM (chuck_engine).
-        board.PollMidi([](uint8_t ch, uint8_t note) { engine.handle_midi_note(ch, note); });
+        // Forward the full raw MIDI stream to the engine: ChucK delivers it to a patch's MidiIn (real
+        // velocity, NoteOff, CC, pitch-bend, ...) and also feeds the NoteOn global bridge. handle_midi_*
+        // only enqueues here; the audio ISR drains and delivers to the VM (chuck_engine).
+        board.PollMidi([](uint8_t st, uint8_t d1, uint8_t d2) { engine.handle_midi_message(st, d1, d2); });
 
         const bool selecting = controls.enc_press;
         g_selecting = selecting;

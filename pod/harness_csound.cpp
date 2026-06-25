@@ -73,9 +73,12 @@ int main(void)
     while (1) {
         board.Poll(controls);
 
-        // MIDI NoteOn -> the engine's MidiNote instrument (channel -> deck, note -> Hz). handle_midi_note
-        // only enqueues here; the audio ISR drains and schedules it (csound_midi.h).
-        board.PollMidi([](uint8_t ch, uint8_t note) { engine.handle_midi_note(ch, note); });
+        // The board surfaces the full raw MIDI stream; Csound only plays NoteOns, so pull those out
+        // (status NoteOn nibble, velocity > 0) and forward to the MidiNote instrument (channel -> deck,
+        // note -> Hz). handle_midi_note only enqueues here; the audio ISR drains and schedules it.
+        board.PollMidi([](uint8_t st, uint8_t d1, uint8_t d2) {
+            if ((st & 0xf0) == 0x90 && d2 > 0) engine.handle_midi_note(static_cast<uint8_t>(st & 0x0f), d1);
+        });
 
         // Patch selector (CapAux), the Pod analog of the firmware's Alt+PITCH gesture: hold the encoder
         // to open the bank, turn KNOB_1 to scroll the [built-in, csound/0.csd .. 7.csd] list (preview),

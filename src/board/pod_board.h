@@ -58,20 +58,24 @@ public:
     // before the main loop.
     void StartMidi() { hw_.midi.StartReceive(); }
 
-    // Main loop: parse buffered MIDI and invoke sink(channel, note) for each NoteOn. A velocity-0 NoteOn
-    // is the running-status NoteOff, so it is dropped to match the engines' NoteOn-only contract. `sink`
-    // is any callable taking (uint8_t channel, uint8_t note) - e.g. a lambda forwarding to
-    // engine.handle_midi_note. Channels are 0-based (0 = MIDI channel 1).
+    // Main loop: parse buffered MIDI and forward each representable message to sink(status, data1, data2)
+    // - the full channel-voice stream (NoteOn/Off with real velocity, control change, pitch-bend, poly/
+    // channel aftertouch, program change) plus system realtime (clock/start/continue/stop). `status` is
+    // the raw MIDI status byte, including the channel nibble for channel-voice messages; data1/data2 are
+    // the message data bytes (0 where unused). SysEx / system-common aren't representable in a 3-byte
+    // message and are skipped. `sink` is any callable taking (uint8_t status, uint8_t data1, uint8_t
+    // data2) - e.g. a lambda forwarding to engine.handle_midi_message (ChucK), or extracting NoteOn for
+    // engine.handle_midi_note (Csound). Channels are 0-based (0 = MIDI channel 1).
     template <typename Sink>
     void PollMidi(Sink&& sink)
     {
         hw_.midi.Listen();
         while (hw_.midi.HasEvents()) {
             daisy::MidiEvent ev = hw_.midi.PopEvent();
-            if (ev.type == daisy::NoteOn) {
-                daisy::NoteOnEvent n = ev.AsNoteOn();
-                if (n.velocity > 0) sink(n.channel, n.note);
-            }
+            const uint8_t status = midi_status_byte(ev);
+            if (!status)            continue;                       // not a 3-byte-representable message
+            if (status >= 0xF8)     sink(status, 0, 0);            // system realtime: status byte only
+            else                    sink(status, ev.data[0], ev.data[1]);
         }
     }
 
@@ -92,6 +96,36 @@ public:
     daisy::DaisyPod& hw() { return hw_; }
 
 private:
+    // MIDI status byte (incl. channel) for a channel-voice MidiEvent, the realtime status for the
+    // forwarded system-realtime messages, or 0 for events not representable as a 3-byte message (the
+    // caller skips those). The daisy MidiMessageType enum is ordered NoteOff..PitchBend, i.e. status
+    // nibbles 0x80..0xE0; ChannelMode is control change (0xB0).
+    static uint8_t midi_status_byte(const daisy::MidiEvent& ev)
+    {
+        switch (ev.type) {
+            case daisy::NoteOff:
+            case daisy::NoteOn:
+            case daisy::PolyphonicKeyPressure:
+            case daisy::ControlChange:
+            case daisy::ProgramChange:
+            case daisy::ChannelPressure:
+            case daisy::PitchBend:
+                return static_cast<uint8_t>((0x80 + (static_cast<int>(ev.type) << 4)) | (ev.channel & 0x0f));
+            case daisy::ChannelMode:
+                return static_cast<uint8_t>(0xB0 | (ev.channel & 0x0f));   // channel-mode = CC 120..127
+            case daisy::SystemRealTime:
+                switch (ev.srt_type) {
+                    case daisy::TimingClock: return 0xF8;
+                    case daisy::Start:       return 0xFA;
+                    case daisy::Continue:    return 0xFB;
+                    case daisy::Stop:        return 0xFC;
+                    default:                 return 0;
+                }
+            default:
+                return 0;
+        }
+    }
+
     daisy::DaisyPod hw_;
 };
 

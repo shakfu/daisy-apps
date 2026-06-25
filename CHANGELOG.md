@@ -53,11 +53,20 @@ under **Unreleased**.
   `midiio_rtmidi`'s RtMidi backend stripped - there is no OS MIDI API or callback thread on bare metal,
   and `rtmidi.cpp` (166 KB) stays out. A new `MidiInManager::inject()` feeds bytes straight into ChucK's
   per-VM MIDI buffer + event-wake path, so a patch can use the desktop-portable
-  `MidiIn min; min.recv(msg);` idiom (`examples/chuck/midi_in.ck`). `ChuckEngine::process()` injects each
-  incoming NoteOn into device 0 alongside the global bridge. The vendored-source edits live in
-  `scripts/patches/midi_daisy.patch`, applied idempotently by `scripts/fetch_chuck.sh` (because
-  `thirdparty/chuck` is gitignored and regenerated). See `docs/dev/chuck-midi-in.md` for status, the
-  retired wake-path risk, and known limitations (NoteOn-only, fixed velocity for now).
+  `MidiIn min; min.recv(msg);` idiom (`examples/chuck/midi_in.ck`). The **full channel-voice stream** is
+  forwarded (real velocity, NoteOff, CC, pitch-bend, aftertouch, program change) plus system realtime
+  (clock/start/continue/stop): the board abstraction's `PollMidi` now surfaces raw 3-byte messages, a new
+  `IEngine::handle_midi_message(status, d1, d2)` virtual (no-op for engines that only use
+  `handle_midi_note`) is driven from the Pod harness, and `ChuckEngine` enqueues raw bytes on a lock-free
+  ring (`chuck_midi_in.h`) that `process()` drains and injects into device 0 right before `ck->run()`.
+  NoteOns are still also fed to the global bridge (the `notesA`/`noteOnA` convention) so both delivery
+  styles work at once; the Csound harness pulls NoteOns out of the same raw stream. The vendored-source
+  edits live in `scripts/patches/midi_daisy.patch`, applied idempotently by `scripts/fetch_chuck.sh`
+  (because `thirdparty/chuck` is gitignored and regenerated). Builds for all three board targets (and the
+  Csound harness) link with matching ABI. See `docs/dev/chuck-midi-in.md` for status and the retired
+  wake-path risk, and `docs/dev/chuck-midi-in-porting.md` for the replication guide (the same change was
+  ported to the `sk-engines`/spotykach sibling). On-hardware wake test still pending; SysEx / system-common
+  aren't representable in a 3-byte `MidiMsg` and are not forwarded.
 - Example patch banks under `examples/` (`examples/csound/0.csd` .. `6.csd`,
   `examples/chuck/0.ck` .. `7.ck`), each with a README adapted to the Pod harness (encoder selector,
   no MIDI, only PITCH + MIX driven). `make sd-card SD=/Volumes/<card>` (a thin

@@ -478,19 +478,26 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
         while (_notes.pop(ev)) {
             const int d = (ev.deck == 0) ? 0 : 1;
             if (n[d] < kMaxBlockNotes) batch[d][n[d]++] = ev.note;
-            // Also feed the re-introduced ChucK MidiIn device (virtual UART = device 0): a patch using
-            // `MidiIn min; min.recv(msg)` sees these as NoteOn messages (status NoteOn|deck, note, a
-            // fixed velocity - the bridge ring carries no velocity). This coexists with the global
-            // bridge above; injecting here (same thread as run(), right before it) means a shred blocked
-            // on `min => now` is woken by ck->run() this block. See docs/dev/chuck-midi-in.md.
-            MidiInManager::inject(0, static_cast<t_CKBYTE>(MIDI_NOTEON | d),
-                                  static_cast<t_CKBYTE>(ev.note), static_cast<t_CKBYTE>(100));
         }
         for (int d = 0; d < 2; d++) {
             if (n[d] == 0) continue;
             g->setGlobalIntArray(note_array_global(d), batch[d], static_cast<t_CKUINT>(n[d]));
             g->setGlobalInt(note_count_global(d), n[d]);
             g->broadcastGlobalEvent(note_event_global(d));
+        }
+    }
+
+    // Deliver the FULL raw MIDI stream to ChucK's re-introduced MidiIn device (virtual UART = device 0)
+    // here, on the run() thread, right before run() - so a shred blocked on `min => now` is woken by this
+    // run() (no ChucK threads on this build; the wake rides the per-VM event buffer ck->run() services).
+    // Real velocity, NoteOff, CC, pitch-bend, aftertouch, program change and system realtime all arrive,
+    // so a patch reads msg.data1/data2/data3 exactly as on the desktop (examples/chuck/midi_in.ck). This
+    // is independent of the global bridge above (which serves the notesA/noteOnA convention).
+    {
+        MidiMessage m;
+        while (_midi.pop(m)) {
+            MidiInManager::inject(0, static_cast<t_CKBYTE>(m.status),
+                                  static_cast<t_CKBYTE>(m.data1), static_cast<t_CKBYTE>(m.data2));
         }
     }
 
@@ -584,6 +591,20 @@ DeckRef::Ref ChuckEngine::handle_midi_note(uint8_t channel, uint8_t note)
     // still return the deck so the gate-in flashes (the NoteOn was received).
     _notes.push({ note, static_cast<uint8_t>(ref == DeckRef::A ? 0 : 1) });
     return ref;
+}
+
+void ChuckEngine::handle_midi_message(uint8_t status, uint8_t data1, uint8_t data2)
+{
+    if (!_gate.current()) return;                  // no VM yet -> nowhere to deliver
+
+    // Full raw stream -> ChucK's MidiIn device (drained + injected in process()). No channel filtering:
+    // a patch sees the whole stream and routes by status/channel itself (the desktop MidiIn contract).
+    _midi.push({ status, data1, data2 });
+
+    // Also feed the global bridge for a NoteOn (velocity > 0), so the notesA/noteOnA convention keeps
+    // working alongside MidiIn. handle_midi_note maps channel->deck and enqueues on the _notes ring.
+    if ((status & 0xf0) == 0x90 && data2 > 0)
+        handle_midi_note(static_cast<uint8_t>(status & 0x0f), data1);
 }
 
 } // namespace daisyapps

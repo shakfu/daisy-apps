@@ -5,7 +5,8 @@
 #include "engine/iengine.h"
 #include "engine/chuck/chuck_patch.h"        // kMaxChuckSlots (bank size) + the SD .ck selector
 #include "engine/csound/csound_reload.h"     // ReloadGate: lock-free VM<->ISR handoff for live swap
-#include "engine/midi_note.h"                // NoteQueue / MidiNoteEvent / midi_note_to_hz (MIDI-in)
+#include "engine/midi_note.h"                // NoteQueue / MidiNoteEvent / midi_note_to_hz (global bridge)
+#include "engine/chuck/chuck_midi_in.h"      // MidiMessage / MidiMsgQueue: raw-MIDI ring (real MidiIn)
 
 // SKETCH (2026-06, M2): ChuckEngine wraps a ChucK runtime (the language/VM/UGens) behind IEngine,
 // modelled directly on CsoundEngine. Like Csound, it builds ONLY in the QSPI firmware target - the
@@ -53,10 +54,14 @@ public:
     // live recompile in prepare() on the held->release edge.
     void         set_aux_active(DeckRef::Ref d, bool active) override;
 
-    // MIDI NoteOn -> a global frequency + a broadcast Event the .ck program can wait on (channel->deck,
-    // note->Hz). NoteOn only (no NoteOff/velocity): enqueued on the lock-free ring here (main loop) and
-    // delivered to the VM in process() (audio ISR), right before run(). See chuck_engine.cpp.
+    // MIDI delivery. handle_midi_message() takes the FULL raw stream (real velocity, NoteOff, CC,
+    // pitch-bend, aftertouch, program change, system realtime) and feeds ChucK's re-introduced MidiIn
+    // device (device 0) so a patch can `MidiIn min; min.recv(msg);`. handle_midi_note() is the older
+    // NoteOn-only path that feeds the global bridge (notesA/noteOnA globals); handle_midi_message()
+    // delegates NoteOns to it so both delivery styles work at once. Both enqueue on a lock-free ring here
+    // (main loop), drained in process() (audio ISR) right before run(). See chuck_engine.cpp.
     DeckRef::Ref handle_midi_note(uint8_t channel, uint8_t note) override;
+    void         handle_midi_message(uint8_t status, uint8_t data1, uint8_t data2) override;
 
 private:
     // Build the ONE persistent ChucK VM: new ChucK / setParam / init / start - NO program compiled yet
@@ -168,7 +173,8 @@ private:
     static constexpr int kSlots = 16;     // 8 per deck
     float _cache[kSlots] = {0.f};
 
-    NoteQueue<32> _notes;                 // pending MIDI notes: main loop pushes, process() (ISR) drains
+    NoteQueue<32> _notes;                 // global bridge: NoteOns; main loop pushes, process() (ISR) drains
+    MidiMsgQueue<64> _midi;               // real MidiIn: full raw stream; main loop pushes, ISR drains+injects
 };
 
 } // namespace daisyapps
