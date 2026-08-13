@@ -1,7 +1,8 @@
 #pragma once
 
-#include "daisy_seed.h"            // FatFs FIL / f_* + SdmmcHandler + FatFSInterface, via libDaisy
+#include "daisy_seed.h"            // FatFs FIL / f_*, via libDaisy
 #include "engine/istreamdeck.h"
+#include "sd_card.h"               // SdCard: the SDMMC + FatFs mount (shared with hw/stream_deck.h)
 
 namespace daisyapps {
 
@@ -21,22 +22,11 @@ namespace daisyapps {
 // [built-in, present slots...] list. (ChucK is analogous: `chuck/0.ck` .. `chuck/7.ck`.)
 class SdStreamDeck : public IStreamDeck {
 public:
-    // Bring up SDMMC (1-bit, MEDIUM_SLOW: the robust universal default) and mount the card's FatFs.
-    // Returns false if no card is present or the mount fails; the engine then simply runs its built-in
-    // orchestra, because every patch path tolerates a "file not found". The handler and interface are
-    // members so the mounted filesystem stays alive for the whole session. Call once, at startup, from
+    // Mount the card. Returns false if no card is present or the mount fails; the engine then simply
+    // runs its built-in orchestra, because every patch path tolerates a "file not found". The SdCard is
+    // a member so the mounted filesystem stays alive for the whole session. Call once, at startup, from
     // the main thread - the card must be inserted at power-on (this harness does not hot-remount).
-    bool Init()
-    {
-        daisy::SdmmcHandler::Config cfg;
-        cfg.Defaults();
-        cfg.speed = daisy::SdmmcHandler::Speed::MEDIUM_SLOW;
-        cfg.width = daisy::SdmmcHandler::BusWidth::BITS_1;
-        if (_sd.Init(cfg) != daisy::SdmmcHandler::Result::OK) return false;
-
-        _fsi.Init(daisy::FatFSInterface::Config::MEDIA_SD);   // links libDaisy I/O to the FatFs driver
-        return f_mount(&_fsi.GetSDFileSystem(), _fsi.GetSDPath(), 1) == FR_OK;
-    }
+    bool Init() { return _card.Mount(); }
 
     // --- the two methods the patch banks actually use --------------------------------------------
     // f_stat needs no FIL handle, so it is safe to call at any time.
@@ -72,8 +62,7 @@ public:
     uint32_t loop_frames(DeckRef::Ref) const          override { return 0; }
 
 private:
-    daisy::SdmmcHandler   _sd;
-    daisy::FatFSInterface _fsi;
+    SdCard _card;
 };
 
 } // namespace daisyapps

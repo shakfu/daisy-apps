@@ -48,10 +48,34 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The two harnesses. Each entry says how to build it (extra `make` args appended after `-C pod`),
-# which binary the build drops into pod/build/, and the static lib that must already exist (a clear
-# error beats a cryptic link failure). csound uses the default Makefile; chuck uses Makefile.chuck.
-ENGINES = {
+# The firmwares this repo can ship, in two families that build differently.
+#
+#   app/  - the engine host: one harness, the engine picked by ENGINE=. Each (engine, board) pair has
+#           its own build-<engine>-<board>/ directory, so pairs are already independent and no cleaning
+#           between them is needed. Everything here builds from source in-tree, with no external
+#           dependency, which is why these make up the default matrix.
+#   pod/  - the two audio-language harnesses, which predate app/ and keep their own Makefiles. Each
+#           needs a cross-built static library that must be fetched first, and the two SHARE one
+#           pod/build/ directory with conflicting per-object defines, so it is removed between pairs.
+#
+# `license` marks the artifacts that are NOT MIT: qdelay and glitch incorporate GPLv3 code (see the
+# NOTICE.md beside each engine), so a binary built from them is a combined work that must be
+# distributed under GPLv3. The manifest and release notes call those out by name rather than leaving
+# a downloader to discover it.
+APP_ENGINES = [
+    "passthrough", "delay", "qdelay", "glitch", "reverb", "chorus", "filter", "voice", "gigaverb",
+    "radio", "tape", "shuttle", "pstretch", "softcut", "bard",
+    "reso", "mosc", "granular", "graincloud", "edrums",
+    "diag",          # not an engine: the hardware diagnostic, and the most useful single download
+]
+
+GPL_ENGINES = {
+    "qdelay": "derives from qdelay (tilr) - see src/engine/qdelay/NOTICE.md",
+    "glitch": "derives from Noisferatu (Rob Scape) - see src/engine/glitch/NOTICE.md",
+}
+
+# The pod/ harnesses, keyed as engines too so the matrix stays one flat list of (engine, board).
+POD_ENGINES = {
     "csound": {
         "make_args": [],
         "bin": "harness.bin",
@@ -63,6 +87,27 @@ ENGINES = {
         "prereq": ("thirdparty/chuck/Daisy/lib/libchuck.a", "run scripts/fetch_chuck.sh first"),
     },
 }
+
+ALL_ENGINES = APP_ENGINES + list(POD_ENGINES)
+
+
+def default_engines() -> list[str]:
+    """The default release matrix: every app/ engine, plus the pod/ harnesses.
+
+    The pod entries are filtered out later if their cross-built libraries are absent - see main().
+    """
+    return list(ALL_ENGINES)
+
+
+def is_pod_engine(engine: str) -> bool:
+    return engine in POD_ENGINES
+
+
+def app_artifact(engine: str, board: str) -> tuple[str, str]:
+    """(build directory, binary name) for an app/ engine. diag names its target `diag`."""
+    target = "diag" if engine == "diag" else f"harness_{engine}"
+    return f"build-{engine}-{board}", f"{target}.bin"
+
 
 # The control/UI board targets (src/board/board.h). All three are STM32H750, so they differ only by a
 # -DTARGET_* define (the harness Makefiles map BOARD= to it); the QSPI linker script and bootloader are
@@ -141,43 +186,64 @@ def build_pair(engine: str, board: str, version: str, jobs: int, out_dir: Path,
     """Clean-build one (engine, board) pair, copy its artifacts into out_dir, return .bin size.
 
     The .bin is always produced (both documented flash paths use it); the .hex is copied only when
-    emit_hex is set, for users flashing via ST-Link / STM32CubeProgrammer. pod/build is removed first
-    because the two harnesses share it with conflicting per-object defines.
+    emit_hex is set, for users flashing via ST-Link / STM32CubeProgrammer.
     """
-    spec = ENGINES[engine]
-    rel, fix = spec["prereq"]
-    if not (REPO_ROOT / rel).exists():
-        raise SystemExit(f"ERROR: {engine} needs {rel} - {fix}")
-
     print(f"==> building {engine} / {board}")
-    shutil.rmtree(REPO_ROOT / "pod" / "build", ignore_errors=True)
-    run_make("-C", "pod", f"-j{jobs}", f"BOARD={board}", *spec["make_args"])
+
+    if is_pod_engine(engine):
+        spec = POD_ENGINES[engine]
+        rel, fix = spec["prereq"]
+        if not (REPO_ROOT / rel).exists():
+            raise SystemExit(f"ERROR: {engine} needs {rel} - {fix}")
+        # The two pod harnesses share one build directory with conflicting per-object defines.
+        shutil.rmtree(REPO_ROOT / "pod" / "build", ignore_errors=True)
+        run_make("-C", "pod", f"-j{jobs}", f"BOARD={board}", *spec["make_args"])
+        built = REPO_ROOT / "pod" / "build"
+        built_bin = spec["bin"]
+    else:
+        build_dir, built_bin = app_artifact(engine, board)
+        # Already per-pair, so this is about reproducibility rather than correctness: a release
+        # should not be able to pick up an object from an earlier, differently-configured build.
+        shutil.rmtree(REPO_ROOT / "app" / build_dir, ignore_errors=True)
+        run_make("-C", "app", f"-j{jobs}", f"ENGINE={engine}", f"BOARD={board}")
+        built = REPO_ROOT / "app" / build_dir
 
     base = f"{ARTIFACT_PREFIX}-{engine}-{board}-{version}"
-    built = REPO_ROOT / "pod" / "build"
     bin_path = out_dir / f"{base}.bin"
-    shutil.copyfile(built / spec["bin"], bin_path)
+    shutil.copyfile(built / built_bin, bin_path)
     if emit_hex:
-        shutil.copyfile(built / spec["bin"].replace(".bin", ".hex"), out_dir / f"{base}.hex")
+        shutil.copyfile(built / built_bin.replace(".bin", ".hex"), out_dir / f"{base}.hex")
 
     return bin_path.stat().st_size
 
 
 def write_manifest(path: Path, version: str, dirty: str, git_sha: str,
-                   sizes: dict[tuple[str, str], int]) -> None:
+                   sizes: dict[tuple[str, str], int],
+                   skipped: list[tuple[str, str]] | None = None) -> None:
     lines = [
         "daisy-apps firmware release",
         f"version:    {version}{dirty}",
         f"git commit: {git_sha}",
-        "note:       these apps require a QSPI-capable Daisy bootloader already installed "
-        "(see RELEASE_NOTES.md)",
-        "note:       only the 'pod' board is hardware-validated; patch_init / patch are untested",
-        "",
-        f"{'engine':<10} {'board':<12} {'bytes':>12}  binary",
+        "note:       these apps require a Daisy bootloader already installed (see RELEASE_NOTES.md)",
+        "note:       NOTHING here is hardware-validated except the pod csound/chuck harnesses;",
+        "            every app/ engine and the patch / patch_init board drivers compile but are untested",
     ]
+    shipped_gpl = sorted({e for (e, _b) in sizes if e in GPL_ENGINES})
+    if shipped_gpl:
+        lines.append("note:       GPLv3 artifacts in this release: " + ", ".join(shipped_gpl))
+    for engine, why in (skipped or []):
+        lines.append(f"skipped:    {engine} ({why})")
+    lines += ["", f"{'engine':<12} {'board':<12} {'bytes':>12}  {'license':<7}  binary"]
+
     for (engine, board), size in sizes.items():
         name = f"{ARTIFACT_PREFIX}-{engine}-{board}-{version}.bin"
-        lines.append(f"{engine:<10} {board:<12} {size:>12}  {name}")
+        lic = "GPLv3" if engine in GPL_ENGINES else "MIT"
+        lines.append(f"{engine:<12} {board:<12} {size:>12}  {lic:<7}  {name}")
+
+    if shipped_gpl:
+        lines += ["", "GPLv3 artifacts (a combined work with GPLv3 DSP; source must be available):"]
+        for e in shipped_gpl:
+            lines.append(f"  {e}: {GPL_ENGINES[e]}")
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -288,9 +354,22 @@ def write_release_notes(path: Path, version: str, engines: list[str], boards: li
             "release notes will note the changelog is missing\n"
         )
         changelog = "_No CHANGELOG entry for this release._"
+    gpl = sorted(e for e in engines if e in GPL_ENGINES)
+    licensing = ""
+    if gpl:
+        rows = "\n".join(f"- **`{e}`** - {GPL_ENGINES[e]}" for e in gpl)
+        licensing = (
+            "\n## Licensing\n\n"
+            "Most of this project is MIT, but the binaries below incorporate GPLv3 DSP and are "
+            "therefore **distributed under GPLv3** as combined works - source must be available to "
+            "anyone you give them to:\n\n"
+            f"{rows}\n\n"
+            "Every other artifact in this release is MIT. See `MANIFEST.txt` for the per-file "
+            "license column.\n"
+        )
     path.write_text(
         f"## Changes since the last Release\n\n{changelog}\n\n"
-        f"{flashing_section(version, engines, boards)}\n"
+        f"{flashing_section(version, engines, boards)}\n{licensing}"
     )
 
 
@@ -315,7 +394,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--engines", nargs="*", default=[],
-        help="engines to build (default: $RELEASE_ENGINES, else: " + " ".join(ENGINES),
+        help="engines to build (default: $RELEASE_ENGINES, else: " + " ".join(ALL_ENGINES),
     )
     parser.add_argument(
         "--boards", nargs="*", default=[],
@@ -337,7 +416,23 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
     version = args.version or default_version()
-    engines = resolve_list(args.engines, "RELEASE_ENGINES", list(ENGINES), "engine", list(ENGINES))
+    explicit = bool(args.engines) or bool(os.environ.get("RELEASE_ENGINES", "").split())
+    engines = resolve_list(args.engines, "RELEASE_ENGINES", default_engines(), "engine", ALL_ENGINES)
+
+    # An explicitly requested pod engine with a missing library is a hard error (build_pair raises);
+    # one that merely came from the default matrix is skipped with a notice, so `make dist` works out
+    # of the box on a checkout that has never run the csound/chuck fetch scripts.
+    skipped: list[tuple[str, str]] = []
+    if not explicit:
+        keep = []
+        for e in engines:
+            if is_pod_engine(e):
+                rel, fix = POD_ENGINES[e]["prereq"]
+                if not (REPO_ROOT / rel).exists():
+                    skipped.append((e, f"{rel} absent - {fix}"))
+                    continue
+            keep.append(e)
+        engines = keep
     boards = resolve_list(args.boards, "RELEASE_BOARDS", BOARDS, "board", BOARDS)
 
     git_sha = git_output("rev-parse", "--short", "HEAD") or "unknown"
@@ -347,6 +442,8 @@ def main(argv: list[str]) -> int:
     print(f"Release version : {version}{dirty}")
     print(f"Git commit      : {git_sha}")
     print(f"Engines         : {' '.join(engines)}")
+    for engine, why in skipped:
+        print(f"  skipping {engine}: {why}")
     print(f"Boards          : {' '.join(boards)}")
     print(f"Output          : {out_dir.relative_to(REPO_ROOT)}/\n")
 
@@ -361,7 +458,7 @@ def main(argv: list[str]) -> int:
         for board in boards:
             sizes[(engine, board)] = build_pair(engine, board, version, args.jobs, out_dir, args.hex)
 
-    write_manifest(out_dir / "MANIFEST.txt", version, dirty, git_sha, sizes)
+    write_manifest(out_dir / "MANIFEST.txt", version, dirty, git_sha, sizes, skipped)
     write_release_notes(out_dir / "RELEASE_NOTES.md", version, engines, boards)
     write_checksums(out_dir)
 

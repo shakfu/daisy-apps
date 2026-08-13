@@ -2,6 +2,7 @@
 
 #include "daisy_pod.h"
 #include "board/controls.h"
+#include "board/midi_status.h"
 
 namespace daisyapps {
 
@@ -9,10 +10,15 @@ namespace daisyapps {
 // onboard MCU LED. No CV/gate I/O and no display. Wraps daisy::DaisyPod.
 class PodBoard {
 public:
-    static constexpr int kAnalogCount    = 2;   // KNOB_1, KNOB_2
-    static constexpr int kButtonCount    = 2;   // BUTTON_1, BUTTON_2
-    static constexpr int kGateCount      = 0;
-    static constexpr int kIndicatorCount = 2;   // led1, led2 (RGB)
+    static constexpr int  kAnalogCount    = 2;   // KNOB_1, KNOB_2
+    static constexpr int  kButtonCount    = 2;   // BUTTON_1, BUTTON_2
+    static constexpr int  kGateCount      = 0;
+    static constexpr int  kIndicatorCount = 2;   // led1, led2 (RGB)
+    static constexpr int  kAudioChannels  = 2;   // stereo in/out
+    static constexpr int  kCvOutCount     = 0;   // no CV outputs on the Pod
+    static constexpr bool kHasScreen      = false;
+    static constexpr int  kScreenWidth    = 0;
+    static constexpr int  kScreenHeight   = 0;
 
     // Bring up the Pod BSP (seed + SDRAM + pod controls), set the audio block size + 48 kHz, and start
     // the ADC. VTOR / QSPI-boot setup stays in the harness (it is bootloader concern, not board).
@@ -67,17 +73,18 @@ public:
     // data2) - e.g. a lambda forwarding to engine.handle_midi_message (ChucK), or extracting NoteOn for
     // engine.handle_midi_note (Csound). Channels are 0-based (0 = MIDI channel 1).
     template <typename Sink>
-    void PollMidi(Sink&& sink)
-    {
-        hw_.midi.Listen();
-        while (hw_.midi.HasEvents()) {
-            daisy::MidiEvent ev = hw_.midi.PopEvent();
-            const uint8_t status = midi_status_byte(ev);
-            if (!status)            continue;                       // not a 3-byte-representable message
-            if (status >= 0xF8)     sink(status, 0, 0);            // system realtime: status byte only
-            else                    sink(status, ev.data[0], ev.data[1]);
-        }
-    }
+    void PollMidi(Sink&& sink) { poll_midi_handler(hw_.midi, sink); }
+
+    // --- Outputs the Pod does not have. No-ops so shared harness code compiles and degrades
+    //     gracefully, exactly as SetIndicator does on a board without LEDs. ----------------------
+    void SetCvOut(int, float) {}
+    void SetGateOut(bool) {}
+
+    // --- Screen: the Pod has none, so the whole text/rect facade is inert (see patch_board.h). ---
+    void ScreenClear() {}
+    void ScreenText(int, int, const char*, bool = true) {}
+    void ScreenRect(int, int, int, int, bool) {}
+    void ScreenUpdate() {}
 
     // RGB indicator (idx 0 = led1, 1 = led2). Out-of-range index is a no-op, so engine/harness code
     // that addresses more indicators than a board has degrades gracefully.
@@ -90,42 +97,17 @@ public:
     }
 
     // Onboard MCU LED - present on every Daisy; used for bring-up heartbeats.
+    // The board's QSPI flash handle, as the void* EngineContext::qspi expects. The contract keeps this
+    // opaque so it names no HAL type; the one engine that uses it (edrums, for kit presets) casts it
+    // back to daisy::QSPIHandle* in target-only code.
+    void* Qspi() { return &hw_.seed.qspi; }
+
     void SetUserLed(bool on) { hw_.seed.SetLed(on); }
 
     // Escape hatch for board-specific needs (MIDI, raw seed access) the abstraction does not cover.
     daisy::DaisyPod& hw() { return hw_; }
 
 private:
-    // MIDI status byte (incl. channel) for a channel-voice MidiEvent, the realtime status for the
-    // forwarded system-realtime messages, or 0 for events not representable as a 3-byte message (the
-    // caller skips those). The daisy MidiMessageType enum is ordered NoteOff..PitchBend, i.e. status
-    // nibbles 0x80..0xE0; ChannelMode is control change (0xB0).
-    static uint8_t midi_status_byte(const daisy::MidiEvent& ev)
-    {
-        switch (ev.type) {
-            case daisy::NoteOff:
-            case daisy::NoteOn:
-            case daisy::PolyphonicKeyPressure:
-            case daisy::ControlChange:
-            case daisy::ProgramChange:
-            case daisy::ChannelPressure:
-            case daisy::PitchBend:
-                return static_cast<uint8_t>((0x80 + (static_cast<int>(ev.type) << 4)) | (ev.channel & 0x0f));
-            case daisy::ChannelMode:
-                return static_cast<uint8_t>(0xB0 | (ev.channel & 0x0f));   // channel-mode = CC 120..127
-            case daisy::SystemRealTime:
-                switch (ev.srt_type) {
-                    case daisy::TimingClock: return 0xF8;
-                    case daisy::Start:       return 0xFA;
-                    case daisy::Continue:    return 0xFB;
-                    case daisy::Stop:        return 0xFC;
-                    default:                 return 0;
-                }
-            default:
-                return 0;
-        }
-    }
-
     daisy::DaisyPod hw_;
 };
 

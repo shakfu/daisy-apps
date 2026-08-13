@@ -78,3 +78,11 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Generated SD-card test content (scripts/make_sd_content.py). Reproduced on demand like libs/ and
+# thirdparty/ - ~20 MB of synthesized audio has no business in git.
+examples/sd/
+
+# Python bytecode (scripts/ is stdlib-only tooling)
+__pycache__/
+*.pyc

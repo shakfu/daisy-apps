@@ -81,6 +81,8 @@ enum Capability : uint32_t {
     CapLaunchQuant   = 1u << 3,
     CapTransport     = 1u << 4,
     CapDualDeck      = 1u << 5,
+    CapOwnDisplay    = 1u << 6,  // engine fills DisplayModel in render(); platform blits it directly
+                                 // (bypasses the granular *_leds/render_ring query path) - item 3b-2a
     CapAux           = 1u << 7,  // engine claims Alt+PITCH as a per-deck selector (ParamId::Aux);
                                  // without it Alt+PITCH keeps its default meaning (granular: pitch-quantize)
     CapAltPos        = 1u << 8,  // engine claims the Alt+POS knob layer (ParamId::AltPos); without it
@@ -88,6 +90,12 @@ enum Capability : uint32_t {
     CapPitchPickup   = 1u << 9,  // route PITCH (ParamId::Speed) through the pickup-gated path instead of
                                  // the raw pot, so an engine that snaps speed (shuttle's Play->unity) can
                                  // hold the snap via take_param_reseed until the pot is swept across it
+    CapTerminal      = 1u << 10, // engine implements custom SPK_TERMINAL verbs / query names via
+                                 // handle_command(); advertised so `caps`/`describe`/`help` can note it
+    CapWavCues       = 1u << 11, // engine consumes WAV cue markers: on a load the platform parses the
+                                 // file's `cue ` chunk and delivers the sample-frame offsets via
+                                 // IEngine::on_wav_cues (engine assigns meaning - slice starts, loop
+                                 // points, jump markers, ...). Without it the markers are ignored.
 };
 using Capabilities = uint32_t;
 

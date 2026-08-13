@@ -10,6 +10,105 @@ under **Unreleased**.
 
 ### Added
 
+- **Generic engine host (`app/`)** — one harness that runs any ported sk-engines engine on any of the
+  three boards, with the engine chosen at build time (`make ENGINE=delay BOARD=patch`). Replaces the
+  one-harness-per-engine pattern: `harness.cpp` builds the `EngineContext`, drives `process()` from the
+  audio callback, and maps the panel onto `IEngine` without knowing which engine it is hosting. Each
+  `(engine, board)` pair builds into its own `build-<engine>-<board>/`, so switching engines no longer
+  needs `rm -rf build`. See [`app/README.md`](app/README.md).
+- **Paged parameter UI driven by engine self-description** (`app/param_ui.h`). The pages are not
+  written per engine: each engine declares which `ParamId`s it consumes (`live_params()`) and what it
+  calls them (`param_label()`), and the UI builds pages of four from those answers and prints the
+  engine's own words on the OLED. Knobs use value pickup — a knob writes only once it crosses the
+  engine's current value — with the uncaught gap shown on screen rather than left to guess.
+- **Hardware diagnostic firmware** (`app/diag.cpp`, `make diag BOARD=patch`). Links no engine and none
+  of the engine contract: it drives the board and FatFs directly, because the questions worth asking
+  when an engine is silent — did the ADC read, did the card mount, is the codec running — are ones an
+  engine cannot answer. Seven OLED pages: live analog bars, encoder/buttons/gates with edge counters,
+  MIDI activity with the last message decoded to a note name, SD mount plus a per-file verdict against
+  the on-card format rules, audio I/O peak meters with a test tone, CV/gate output exercise, and system
+  info (sample rate, block size, SDRAM read/write check, uptime). The audio path is a passthrough, so
+  hearing your input confirms the codec and SAI.
+- **Twenty engines ported from sk-engines** — the whole set bar none: `passthrough`, `delay`, `qdelay`,
+  `glitch`, `reverb`, `chorus`, `filter`, `voice`, `gigaverb`; the SD-streaming set `radio`, `tape`,
+  `shuttle`, `pstretch`, `softcut`, `bard`; the Mutable Instruments voices **`reso` (Rings)** and
+  **`mosc` (Plaits)**; the original Spotykach **`granular`** looper and its GrainflowLib variant
+  **`graincloud`**; and the Euclidean drum machine **`edrums`**. All 63 engine x board combinations
+  compile (20 engines plus the diagnostic, three boards); none has been run on hardware.
+- `graincloud` is not a second copy of the granular tree: it is the same sources compiled with
+  `-DSPK_GRAIN_GF=1`, which swaps the per-sample voice array for a per-block GrainflowLib cloud. Its
+  include order puts graincloud first so granular's guarded `#include "gf_cloud.h"` resolves, and it
+  links with the `.bss`-in-AXI-SRAM script (over DTCMRAM by ~36 KB).
+- **`EngineContext::qspi` is now populated** (`Board::Qspi()` on all three boards), closing the last
+  null field in the context. `edrums` uses it to persist kit presets to QSPI flash at a 64 KB offset,
+  clear of the calibration settings and the app image.
+- **`reso` and `mosc` were the first playable engines here** — implementing
+  `handle_midi_note`, `on_gate_trigger` and `cv_voct`, so a keyboard, a trigger and a V/Oct patch all
+  do something. Both vendor their DSP under their own `thirdparty/`, sharing
+  `src/engine/common/thirdparty/stmlib`. `reso` builds `-Os` into SRAM; `mosc` is the first QSPI-execute
+  app in `app/` (the 24-model voice is ~266 KB of code), which added a `SCB->VTOR` prologue to the
+  harness, gated on a new `HARNESS_BOOT_QSPI` define since libDaisy's `BOOT_APP` covers BOOT_SRAM too.
+- **`.cc` compilation support in `app/Makefile`.** Mutable Instruments ships `.cc`, which stock
+  libDaisy's Makefile does not compile (sk-engines does not hit this because it builds against a
+  libDaisy fork that handles it). Adding the rule on this side keeps `libs/` a pristine upstream
+  checkout. Note it must use `CPPFLAGS`, not `CXXFLAGS` — libDaisy does not define the latter, and a
+  rule using it silently compiles with no includes, defines or MCU flags.
+- **SD audio streaming** (`src/hw/stream_deck.{h,cpp}`, `src/hw/fat_file.{h,cpp}`, and the ring/stream
+  primitives under `src/memory/`), ported from sk-engines rather than reimplemented — the threading
+  contract is the delicate part of streaming and upstream's version already runs on hardware. The
+  audio ISR touches only lock-free SDRAM rings; the harness pumps FatFs from the main loop, giving each
+  deck a 1 MB power-of-two ring (~5.5 s of mono read-ahead at 48 kHz) plus 32 KB of shared staging.
+  This is what unblocked the six streaming engines above. `src/engine/istreamdeck.h` was replaced with
+  upstream's full version, which adds `seek_play`, `write_text` and the `bank_sort` helper.
+- **SD card content for the streaming engines**, generated rather than vendored
+  (`scripts/make_sd_content.py`, `make sd-content`): synthesized tones, sweeps, noise and blips —
+  deliberately distinguishable by ear — written into each engine's expected layout, in the exact format
+  its reader accepts. `scripts/provision_sd.sh` and `make sd-card` now cover all eight card-reading
+  engines and generate the audio automatically if it is missing. The tree lands in `examples/sd/`
+  (~20 MB, gitignored, reproduced on demand like `libs/` and `thirdparty/`).
+- **`make sd-verify`** — checks a content tree or a mounted card against the rules the on-device readers
+  apply. This exists because the service reads WAV through two paths that accept **incompatible**
+  formats: `tape`/`shuttle`/`softcut` require mono 32-bit float at exactly 48 kHz, while
+  `radio`/`pstretch`/`bard` require mono 16-bit PCM at any rate. A file in the wrong one is refused at
+  play time with no other symptom. The check also catches non-8.3 names and files under the scanner's
+  32 KB floor, both of which make a file silently invisible to the engine.
+- **CV inputs routed to `IEngine`'s CV surface** (`cv_voct`, `cv_size_pos`, `cv_mix`, `cv_crossfade`),
+  which `radio`, `pstretch`, `bard`, `reso`, `mosc`, `granular` and `graincloud` implement and nothing
+  previously fed. Defaults differ by board
+  because the hardware does: patch.init() routes all four dedicated CV jacks for free, while on the
+  Daisy Patch knob and jack are summed ahead of the ADC, so a CV input costs a parameter knob and the
+  default is off — opt in per build with `make ... CV_INPUTS=2`. `cv_voct` is sent in semitones, the
+  unit upstream's calibrated corrector produces. **It is not calibrated here**: the scaling assumes a
+  linear +/-5 V jack, so pitch tracking is approximate until measured on a real board.
+- **`make dist` now covers both harness families** (`scripts/build_release.py`): the 20 engine-host
+  engines plus the diagnostic, alongside the two `pod/` audio-language harnesses. The pod entries are
+  skipped with a notice when their cross-built libraries are absent, so a fresh checkout can cut a
+  release without fetching Csound or ChucK first. `MANIFEST.txt` gained a per-artifact license column
+  and the release notes a Licensing section, because `qdelay` and `glitch` binaries are GPLv3 combined
+  works and a downloader should not have to discover that.
+- `examples/README.md` — the card layouts for every engine, and the two-WAV-format trap written out.
+- `src/sd_card.h` — the SDMMC + FatFs mount, split out of `SdStreamDeck` so both IStreamDeck
+  implementations share one mount rather than each carrying a copy.
+- `linker/sram_bss_in_axi.lds` — libDaisy's stock SRAM script with `.bss` moved from the 128 KB
+  DTCMRAM into the 480 KB AXI SRAM alongside `.text`. `pstretch` overflows the stock placement by
+  ~172 KB (its FFT working set is ~291 KB of static data) and `bard` by ~10 KB; both select this
+  variant. Because the two sections are allocated sequentially in one region, it needs none of the
+  hand-tuned code/data boundary that upstream's `alt_sram*.lds` carry.
+- `src/terminal/text_sink.cpp` — the out-of-line half of `terminal_io.h`'s `TextSink`, needed because
+  this build defines `SPK_TERMINAL=1` and `radio`/`tape` format query replies through it.
+- **Harness clock glue** (`app/harness_clock.h`): a `daisy::System`-backed `ITimeSource` and a minimal
+  free-running `ITransport` — a 48-PPQN clock at a settable BPM, steerable by quarter-note pulses at a
+  gate input, with the tick fan-out the interface specifies. This plus the 48 MB SDRAM arena in
+  `harness.cpp` closes the two `EngineContext` gaps that previously blocked every buffer-using and
+  tempo-synced engine.
+- `scripts/port_engine.sh` — copies an engine's tree (including any vendored `thirdparty/`) from an
+  sk-engines checkout, rewriting `spotykach` -> `daisyapps`, and reports cross-tree includes this repo
+  is missing.
+- `scripts/fetch_libs.sh` — clones and builds `libs/libDaisy` + `libs/DaisySP`, including libDaisy's own
+  submodules (without which its Makefile stops at the first object file).
+- `src/board/midi_status.h` — the `daisy::MidiEvent` -> raw 3-byte MIDI conversion, shared by the board
+  drivers instead of copied into each one.
+
 - Daisy Pod harnesses for two audio-language engines, ported from the sk-engines firmware:
   `pod/harness_csound.cpp` (`CsoundEngine`) and `pod/harness_chuck.cpp` (`ChuckEngine`), each a thin
   QSPI BOOT app that drives the real engine behind the `IEngine` contract.
@@ -81,6 +180,28 @@ under **Unreleased**.
 
 ### Changed
 
+- **The engine contract is now a full copy of upstream's, not a trimmed subset.** `iengine.h`,
+  `engine_params.h`, `mode.h` and `terminal_io.h` are sk-engines' files with only the namespace
+  substituted, restoring the display/LED region (`render`, `render_ring`, the `*_leds` queries, `mix`,
+  `route`), the `CapOwnDisplay` / `CapWavCues` / `CapTerminal` bits, and the `SPK_TERMINAL` block. This
+  reverses what `docs/dev/porting-sk-engines.md` used to prescribe (strip the display overrides per
+  engine): the shared Faust and gen~ wrappers that every Faust engine specializes depend on
+  `display_model.h` and `indicators.h` directly, so stripping would mean rewriting them on every
+  upstream sync — and the Patch has a screen, which is the condition that guide already named for
+  extending instead. Consequence: an engine now ports with **no source edits beyond the namespace**.
+- `app/` builds with `-DSPK_TERMINAL=1`. There is no terminal here; the flag is on because engines
+  declare their param-liveness masks and knob labels inside that block, and those are exactly what the
+  paged OLED UI needs. `abi_tag.h` came along with the contract, so a `SPK_TERMINAL` mismatch between
+  the `app/` and `pod/` builds is a link error rather than a runtime fault.
+- The contract now depends on libDaisy headers transitively (`iengine.h` -> `display_model.h` ->
+  `led.ring.h` -> `color.h` -> `common.h` -> `<daisy.h>`). Nothing is blocked today — every build here
+  is a firmware build — but it would need addressing before a host/test build exists.
+- **Daisy Patch driver rewritten** (`src/board/patch_board.h`), replacing the scaffold that had never
+  been compiled: MIDI input on the seed UART, the OLED behind a small text/rect facade, CV outputs via
+  the seed DAC, and a gate output. The `Board` contract grew `SetCvOut` / `SetGateOut` / `Screen*` and
+  the `kCvOutCount` / `kHasScreen` / `kScreenWidth` / `kScreenHeight` constants; every board implements
+  the whole surface, with no-ops where a peripheral is absent, so harness UI code needs no `#ifdef`.
+- Moved `sd_stream_deck.h` from `pod/` to `src/` — it is a service both harness families use.
 - Renamed the C++ namespace `spotykach` to `daisyapps` across all sources, and reworded the
   sk-engines/spotykach references in comments and docs for this standalone repo.
 - Pointed the harness Makefiles at the vendored `libs/libDaisy` and `libs/DaisySP`.
@@ -95,17 +216,29 @@ under **Unreleased**.
 
 ### Removed
 
-- The spotykach front-panel LED/ring/display layer: `led.ring.{h,cpp}`, `display_model.h`,
+- ~~The spotykach front-panel LED/ring/display layer: `led.ring.{h,cpp}`, `display_model.h`,
   `engine_leds.h`, `color.{h,cpp}`; the `render()` / `render_ring()` / LED-query virtuals from
   `IEngine`; the `render()` overrides and their output meters from both engines; and the now-unused
-  `CapOwnDisplay` capability. The engines are now audio-only behind a slimmer `IEngine`.
+  `CapOwnDisplay` capability.~~ **Reinstated** when the engine host arrived — see Changed above. The
+  csound/chuck engines' own `render()` overrides remain stripped (they were edited out at port time and
+  the base-class no-op defaults cover them); everything else is back at upstream parity.
 - `bootloader-spotykach-v2.bin` (project-specific bootloader). `program-boot` now flashes libDaisy's
   bundled stock bootloader for the ChucK harness; the Csound harness uses the Daisy v5.4 image from
   the fetched Csound port.
 
 ### Notes
 
-- Validated on hardware: Daisy Pod only. The patch.init() and Daisy Patch drivers compile and link
-  against both engines but are untested on a device.
-- Deferred (per the abstraction's input-focused scope): the Daisy Patch OLED (`SetIndicator` is a
-  no-op there) and the CV/gate **outputs** on patch.init() and Daisy Patch.
+- Validated on hardware: Daisy Pod only, and only the csound/chuck harnesses. The Daisy Patch and
+  patch.init() drivers, the `app/` engine host, and all nine ported engines compile for every board but
+  have never been run on a device.
+- The Daisy Patch OLED and the CV/gate outputs on both Eurorack targets are no longer deferred — they
+  are implemented in the board drivers and driven by `app/harness.cpp`. `patch_init_board.h`'s LED
+  writes were also fixed: they used the removed `dsy_gpio_write` C API, which had gone unnoticed
+  because that target had never been compiled.
+- Every field of `EngineContext` is now populated. The one capability still unserved is `CapWavCues`:
+  the parser exists in `memory/wav.h` but nothing calls it after a load, and no engine in the set
+  declares the bit.
+- One ported engine needed a source edit beyond the namespace — `edrums`, whose QSPI preset store was
+  written against the bleeptools libDaisy fork's three-argument `PersistentStorage`. Rewritten against
+  stock libDaisy's one-argument version, with the reasoning in a comment at the site. Every other
+  engine is a verbatim copy.

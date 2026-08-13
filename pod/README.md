@@ -76,8 +76,7 @@ cross-compiled `libcsound.a` / `libchuck.a` (and their source trees) are **not**
 is gitignored and reproduced on demand by the fetch scripts. Build the dependencies once:
 
 ```
-make -C ../libs/libDaisy        # build libdaisy.a   (once)
-make -C ../libs/DaisySP         # build libdaisysp.a (once)
+../scripts/fetch_libs.sh        # clone + build ../libs/{libDaisy,DaisySP}  (once)
 ../scripts/fetch_csound.sh      # fetch + cross-build ../thirdparty/csound/Daisy/lib/libcsound.a
 ../scripts/fetch_chuck.sh       # fetch + cross-build ../thirdparty/chuck/Daisy/lib/libchuck.a
 ```
@@ -96,7 +95,13 @@ different defines, so **`rm -rf build` when switching between the Csound and Chu
 
 The Makefiles' `../src`, `../libs/{libDaisy,DaisySP}`, and `../thirdparty/{csound,chuck}` paths assume
 this directory sits at the repo root (one level deep) — keep it there. (In sk-engines the Daisy libs
-lived at `../lib`; here they are the vendored `../libs` tree, the only path that changed.)
+lived at `../lib`; here they are the fetched `../libs` tree, the only path that changed.)
+
+These two harnesses predate `app/`, the generic engine host that runs any other ported engine on any
+board from one source file. They stay separate because each needs an externally cross-built static
+library and its own QSPI link, neither of which the engine host handles. `sd_stream_deck.h` moved from
+this directory to `../src/` when `app/` began using it too; the include is unqualified in both, so it
+resolves through `-I../src` either way.
 
 ## Bootloader & heap notes
 

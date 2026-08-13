@@ -31,6 +31,30 @@ struct BankEntry {
     bool     is_wav;     // false = headerless .raw, true = 16-bit-mono PCM .wav
 };
 
+// Order a freshly-scanned bank by case-insensitive filename so the selector index (radio station /
+// pstretch clip) follows a deterministic alphabetical order rather than FAT directory-enumeration order.
+// Small n (a few dozen) -> in-place insertion sort, no <algorithm>/allocation; safe to call from the main
+// loop. The compare is lexicographic, so zero-pad numeric names (01.wav .. 12.wav) for natural numeric order.
+inline void bank_sort(BankEntry* out, int n) {
+    for (int i = 1; i < n; ++i) {
+        const BankEntry key = out[i];
+        int j = i - 1;
+        while (j >= 0) {
+            const char* a = key.name; const char* b = out[j].name;
+            int cmp = 0;
+            for (;;) {
+                char ca = *a++, cb = *b++;
+                if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + 32);
+                if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + 32);
+                if (ca != cb) { cmp = (ca < cb) ? -1 : 1; break; }
+                if (ca == '\0') break;                       // equal
+            }
+            if (cmp < 0) { out[j + 1] = out[j]; --j; } else break;   // stable: stop on >=
+        }
+        out[j + 1] = key;
+    }
+}
+
 struct IStreamDeck {
     virtual ~IStreamDeck() = default;
 
@@ -72,6 +96,12 @@ struct IStreamDeck {
     // False if busy / missing / not a 16-bit-mono PCM WAV.
     virtual bool     start_play_wav(DeckRef::Ref, const char* /*path*/, uint32_t /*start_frame*/,
                                     bool /*loop*/) { return false; }
+    // Re-seek a PLAYING deck's ALREADY-OPEN raw/wav file to `frame`: an f_lseek on the live handle plus a
+    // ring flush, instead of the f_open + (for a .wav) header re-parse that start_play_* pays. This is the
+    // "lighter in-file seek" docs/dev/radio-impl.md asks for; the bard engine's bookmark jumps take it and
+    // fall back to stop + start_play_* only when the target is a different file. False if the deck is not
+    // playing such a stream. Main-loop only.
+    virtual bool     seek_play(DeckRef::Ref, uint32_t /*frame*/) { return false; }
     // Length of a raw file in frames (f_stat filesize / 2; 0 if missing). No file open - used to index a
     // bank's station lengths for the modulo math. Main-loop only.
     virtual uint32_t frames_of(const char* /*path*/) const { return 0; }
@@ -81,6 +111,12 @@ struct IStreamDeck {
     // Read up to max-1 bytes of a small text file into `buf` and NUL-terminate; returns bytes read (0 if
     // missing/empty). Used to read the radio's on-card rate.txt. Main-loop only; not for audio data.
     virtual int      read_text(const char* /*path*/, char* /*buf*/, int /*max*/) const { return 0; }
+    // Write `n` bytes of text to `path`, truncating any existing file; true on success. The mirror of
+    // read_text and the only WRITE an engine can make outside a record deck - used by the bard engine to
+    // persist its small resume table. Main-loop only (FatFs); never for audio data, and never called from
+    // process(). A failure (card absent / write-protected / full) is reported, not fatal: the caller is
+    // expected to carry on and stop retrying.
+    virtual bool     write_text(const char* /*path*/, const char* /*buf*/, int /*n*/) { return false; }
 };
 
 } // namespace daisyapps

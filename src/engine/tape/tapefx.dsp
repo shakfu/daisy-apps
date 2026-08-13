@@ -1,0 +1,65 @@
+// Tape-effect kernel for the tape engine. Regenerate the kernel with `make faust-gen`.
+//
+// Signal chain (mono, one instance per deck): wow/flutter (pitch wobble via a modulated fractional
+// delay) -> Jiles-Atherton hysteresis/saturation. The hysteresis is hysteresis.lib's hy.ja_processor
+// (LGPLv2.1 WITH the Faust library exception, so the cyfaust-generated C++ ships under the project's
+// MIT; (C) 2025 Thomas Mandolini) - the same Jiles-Atherton model as Chowdhury's ChowTapeModel, but
+// self-contained (fixed 4 substeps + cubic-Hermite interpolation = built-in antialiasing, no extra
+// oversampling). In this model the saturation IS the hysteresis nonlinearity: `drive` is the amount,
+// `char` (the J-A reversibility c) is the tone.
+//
+// All four sliders are 0..1 - the C++ (FaustTapeFx in tape_engine.cpp) writes normalized knob values
+// straight into the captured zones; the musical scaling lives here. Labels: "drive", "char", "wow",
+// "rate".
+declare name "tapefx";
+declare description "Tape wow/flutter + Jiles-Atherton hysteresis (sk-engines tape engine).";
+
+import("stdfaust.lib");
+hy = library("hysteresis.lib");
+
+drive  = hslider("drive",  0.3, 0, 1, 0.001); // saturation amount (input drive into the J-A curve)
+chr    = hslider("char",   0.3, 0, 1, 0.001); // tape character (J-A reversibility c)
+wowf   = hslider("wow",    0.3, 0, 1, 0.001); // wow + flutter depth
+rate   = hslider("rate",   0.4, 0, 1, 0.001); // wow + flutter rate
+cutoff = hslider("cutoff", 1.0, 0, 1, 0.001); // post-FX low-pass cutoff (grit+PITCH); 1 = fully open
+reso   = hslider("reso",   0.0, 0, 1, 0.001); // post-FX low-pass resonance/Q (grit+MIX)
+
+// --- wow & flutter: pitch wobble via a modulated fractional delay -------------------------------
+// Periodic (reel rotation), not random - wow slow, flutter as f + 2f + 3f harmonics (cf. ChowTape
+// FlutterProcess). maxdel is a compile-time buffer size; the platform runs at 48 kHz.
+maxdel   = 2400;       // 50 ms @ 48 kHz
+basedel  = 1200.0;     // 25 ms nominal (room to swing either way)
+// Cubic rate curve so the low end is favored: the bottom of the knob barely moves (very slow
+// drift, ~10 s period) and the frequency climbs to a reasonable wobble only near the top. Even
+// at mid-knob the wow is slower than a real reel's nominal 0.5 Hz, fixing the "too fast at the
+// lowest levels" feel of the old linear map (which floored at 0.5 Hz wow / 6 Hz flutter).
+rc       = rate * rate * rate; // favor very low frequencies, increase slowly
+wowHz    = 0.1 + rc * 2.4;     // 0.1 .. 2.5 Hz
+fltHz    = 0.5 + rc * 11.5;    // 0.5 .. 12 Hz
+// os.oscrs (recursive "magic circle" sine) is table-free - os.osc would emit a 64K-entry static sine
+// table (256 KB) that lands in SRAM and overflows the region; the LFOs need no such table.
+wowLFO   = os.oscrs(wowHz);
+fltLFO   = 0.6 * os.oscrs(fltHz) + 0.25 * os.oscrs(2.0 * fltHz) + 0.15 * os.oscrs(3.0 * fltHz);
+moddepth = wowf * 600.0;       // up to ~+/-12.5 ms of delay swing
+delsamp  = basedel + moddepth * (0.7 * wowLFO + 0.3 * fltLFO);
+wowflutter = de.fdelay(maxdel, delsamp);
+
+// --- hysteresis / saturation (Jiles-Atherton) ---------------------------------------------------
+Ms = 380.0; a = 720.0; alpha = 0.015; k = 380.0;  // ferromagnetic params (hysteresis.lib example values)
+c   = 0.25 + chr * 0.65;                           // 0.25 open/dynamic .. 0.9 compressed/controlled
+// ja_processor scales the input by db2linear(-50) into the curve and gain-compensates `drive` on the
+// way out, so drive sets saturation CHARACTER at ~constant level. A wide range (to ~54 dB) is needed to
+// push an audio-level signal from clean into crunch; the core clamps magnetization to [-1,1] so it
+// stays bounded even when driven hard.
+sat = hy.ja_processor(Ms, a, alpha, k, c, ba.db2linear(drive * 54.0), 1.0);
+
+// --- resonant low-pass (playback tone control, AFTER the saturation) -----------------------------
+// A 2-pole resonant low-pass shaped like a dub/tape tone filter. Cutoff is exponential so the sweep
+// is even across the knob; resonance is squared so the low half of the knob stays gentle and only
+// the top adds a strong peak. At cutoff=1 the corner sits ~20 kHz, i.e. transparent (the engine boots
+// here so the filter is inert until swept down). Q starts at 0.7 (flat Butterworth) -> ~10 (resonant).
+fcHz = 40.0 * pow(500.0, cutoff);   // ~40 Hz .. 20 kHz
+Q    = 0.7 + reso * reso * 9.3;     // 0.7 (flat) .. 10 (strong peak)
+lp   = fi.resonlp(fcHz, Q, 1.0);
+
+process = wowflutter : sat : lp;

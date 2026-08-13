@@ -25,16 +25,38 @@ dist:
 	RELEASE_ENGINES="$(RELEASE_ENGINES)" RELEASE_BOARDS="$(RELEASE_BOARDS)" \
 	  $(REL_PY) scripts/build_release.py $(VERSION) $(if $(WITH_HEX),--hex,)
 
-# Copy the example patch banks (examples/{csound,chuck}/<n>.{csd,ck}) onto a mounted FAT32 SD card so
-# the harnesses can load them: numbered slots go into a card-root csound/ and chuck/ folder. Set SD to
-# the card mount point; ENGINES restricts which banks to copy (default: both).
-#   make sd-card SD=/Volumes/DAISY                    # both banks
-#   make sd-card SD=/Volumes/DAISY ENGINES=csound     # just one
+# Provision a mounted FAT32 SD card for every engine that reads one.
+#
+#   make sd-card SD=/Volumes/DAISY                       # everything
+#   make sd-card SD=/Volumes/DAISY ENGINES=csound        # just the csound patch bank
+#   make sd-card SD=/Volumes/DAISY ENGINES='radio bard'  # just those audio trees
+#
+# Two kinds of content. The csound/chuck PATCH BANKS are committed text slots under examples/. The
+# AUDIO content for the streaming engines (radio, tape, shuttle, pstretch, softcut, bard) is generated
+# on demand into examples/sd/ by `make sd-content`, because ~20 MB of synthesized audio does not
+# belong in git - provision_sd.sh generates it automatically if it is missing.
 ENGINES ?=
 .PHONY: sd-card
 sd-card:
-	@test -n "$(SD)" || { echo "usage: make sd-card SD=/Volumes/<card> [ENGINES='csound chuck']"; exit 1; }
+	@test -n "$(SD)" || { echo "usage: make sd-card SD=/Volumes/<card> [ENGINES='radio bard']"; exit 1; }
 	scripts/provision_sd.sh $(SD) $(ENGINES)
+
+# Generate (or regenerate) the streaming engines' test audio into examples/sd/. Synthesized tones,
+# sweeps, noise and blips, each written in the exact format its engine's reader accepts - which is not
+# uniform: tape/shuttle/softcut need mono float32 @48k, while radio/bard/pstretch need mono 16-bit PCM.
+# See scripts/make_sd_content.py.
+.PHONY: sd-content
+sd-content:
+	$(REL_PY) scripts/make_sd_content.py $(if $(SD_OUT),--out $(SD_OUT),)
+
+# Check a content tree - or a real card - against those format rules. A file in the wrong one of the
+# two WAV formats is simply refused by the engine at play time with no other symptom, so this is worth
+# running after putting your own material on a card.
+#   make sd-verify                      # examples/sd/
+#   make sd-verify SD_OUT=/Volumes/DAISY
+.PHONY: sd-verify
+sd-verify:
+	$(REL_PY) scripts/make_sd_content.py --verify $(if $(SD_OUT),--out $(SD_OUT),)
 
 # Upload an already-built dist/<version>/ as a GitHub release (requires `gh auth login`). Tag the
 # release with the SAME bare version passed to `make dist VERSION=x` so names line up.

@@ -22,10 +22,15 @@ namespace daisyapps {
 // DaisyPatchSM::WriteCvOut + gpio writes. Audio is stereo (IN_L/R, OUT_L/R).
 class PatchInitBoard {
 public:
-    static constexpr int kAnalogCount    = 8;   // 4 pots (CV_1..4) then 4 CV ins (CV_5..8)
-    static constexpr int kButtonCount    = 2;   // [0] = momentary button (B7), [1] = toggle (B8)
-    static constexpr int kGateCount      = 2;   // gate_in_1, gate_in_2
-    static constexpr int kIndicatorCount = 1;   // mono user LED (no RGB)
+    static constexpr int  kAnalogCount    = 8;   // 4 pots (CV_1..4) then 4 CV ins (CV_5..8)
+    static constexpr int  kButtonCount    = 2;   // [0] = momentary button (B7), [1] = toggle (B8)
+    static constexpr int  kGateCount      = 2;   // gate_in_1, gate_in_2
+    static constexpr int  kIndicatorCount = 1;   // mono user LED (no RGB)
+    static constexpr int  kAudioChannels  = 2;   // stereo in/out
+    static constexpr int  kCvOutCount     = 2;   // CV_OUT_1 (C10), CV_OUT_2 (C1)
+    static constexpr bool kHasScreen      = false;
+    static constexpr int  kScreenWidth    = 0;
+    static constexpr int  kScreenHeight   = 0;
 
     void Init(int block_size)
     {
@@ -68,14 +73,43 @@ public:
     void StartMidi() {}
     template <typename Sink> void PollMidi(Sink&&) {}
 
+    // --- Outputs --------------------------------------------------------------------------------
+    // CV out `ch` (0 = CV_OUT_1 / pin C10, 1 = CV_OUT_2 / pin C1) from a 0..1 normalized value. The
+    // submodule's WriteCvOut takes VOLTS over a 0..5 V range, so `norm` is scaled by 5. A bipolar
+    // engine signal must be offset by the caller: v = 0.5f + 0.5f * cv.
+    void SetCvOut(int ch, float norm)
+    {
+        if (ch < 0 || ch >= kCvOutCount) return;
+        if (norm < 0.f) norm = 0.f;
+        if (norm > 1.f) norm = 1.f;
+        hw_.WriteCvOut(ch == 0 ? daisy::patch_sm::CV_OUT_1 : daisy::patch_sm::CV_OUT_2, norm * 5.f);
+    }
+
+    // Gate out 1 (pin B5). gate_out_2 is left to board-specific code via hw().
+    void SetGateOut(bool on) { hw_.gate_out_1.Write(on); }
+
+    // --- Screen: patch.init() has none, so the text/rect facade is inert (see patch_board.h). ----
+    void ScreenClear() {}
+    void ScreenText(int, int, const char*, bool = true) {}
+    void ScreenRect(int, int, int, int, bool) {}
+    void ScreenUpdate() {}
+
     // Mono LED: collapse the requested color to on/off (lit if any channel is non-zero).
+    // (These went through the old C GPIO API, dsy_gpio_write(&pin, val), which current libDaisy has
+    // replaced with the GPIO class - DaisyPatchSM::user_led is a daisy::GPIO. This target had never
+    // been compiled, so the stale call had gone unnoticed.)
     void SetIndicator(int idx, float r, float g, float b)
     {
         if (idx != 0) return;
-        dsy_gpio_write(&hw_.user_led, (r > 0.f || g > 0.f || b > 0.f) ? 1 : 0);
+        hw_.user_led.Write(r > 0.f || g > 0.f || b > 0.f);
     }
 
-    void SetUserLed(bool on) { dsy_gpio_write(&hw_.user_led, on ? 1 : 0); }
+    // The board's QSPI flash handle, as the void* EngineContext::qspi expects. The contract keeps this
+    // opaque so it names no HAL type; the one engine that uses it (edrums, for kit presets) casts it
+    // back to daisy::QSPIHandle* in target-only code.
+    void* Qspi() { return &hw_.qspi; }
+
+    void SetUserLed(bool on) { hw_.user_led.Write(on); }
 
     daisy::patch_sm::DaisyPatchSM& hw() { return hw_; }
 
