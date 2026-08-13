@@ -94,9 +94,8 @@ C_DEFS += -DSPK_ENGINE_PSTRETCH
 # Real-time PaulStretch ambient time-smear. Self-contained DSP (a vendored radix-2 FFT, no CMSIS-DSP);
 # per-voice input rings + FFT scratch come from the arena, and the clip source streams from the card.
 # Upstream gives this engine a data-favoured linker split (~291 KB of SRAM data, nearly twice the next
-# worst engine) - which overflows the stock script's 128K DTCMRAM .bss region by ~172K, so this
-# engine links with the .bss-in-AXI-SRAM variant. See linker/sram_bss_in_axi.lds.
-LDSCRIPT = ../linker/sram_bss_in_axi.lds
+# worst engine). It is one of the engines that would overflow the stock script's 128K DTCMRAM .bss
+# region; the repo-wide linker script below handles that for everything.
 C_DEFS += -DSPK_USE_STREAM
 ENGINE_SOURCES = ../src/engine/pstretch/pstretch_engine.cpp
 
@@ -115,9 +114,6 @@ C_DEFS += -DSPK_ENGINE_BARD
 # Long-form spoken-word / audiobook player: WSOLA time-stretch, room tone, bookmarks, and a resume
 # table it persists back to the card - the one engine that WRITES a text file (IStreamDeck::write_text)
 # and re-seeks a playing file (seek_play).
-# Its WSOLA + room-tone buffers overflow the stock script's DTCMRAM .bss region by ~10K, so it links
-# with the .bss-in-AXI-SRAM variant (see linker/sram_bss_in_axi.lds), as pstretch does.
-LDSCRIPT = ../linker/sram_bss_in_axi.lds
 C_DEFS += -DSPK_USE_STREAM
 ENGINE_SOURCES = ../src/engine/bard/bard_engine.cpp
 
@@ -142,9 +138,6 @@ GRAINCLOUD_TP  = ../src/engine/graincloud/thirdparty
 GRAINCLOUD_INC = -I../src/engine/graincloud -I$(GRAINCLOUD_TP) -I../src/engine/granular
 # Granular plus the GrainflowLib templates overflow SRAM_EXEC at -O2 upstream; -Os fits.
 OPT = -Os
-# Its static working set overflows the stock script's 128K DTCMRAM .bss by ~36K, so it links with the
-# .bss-in-AXI-SRAM variant, as pstretch and bard do.
-LDSCRIPT = ../linker/sram_bss_in_axi.lds
 ENGINE_SOURCES = $(filter-out ../src/engine/granular/granular_engine.cpp, $(wildcard ../src/engine/granular/*.cpp)) \
                  $(wildcard ../src/engine/graincloud/*.cpp)
 
@@ -285,6 +278,25 @@ APP_TYPE ?= BOOT_SRAM
 # it for BOOT_SRAM too.
 ifeq ($(APP_TYPE),BOOT_QSPI)
 C_DEFS += -DHARNESS_BOOT_QSPI
+endif
+
+# --- Linker script ----------------------------------------------------------------------------
+# EVERY BOOT_SRAM build uses the .bss-in-AXI-SRAM script, not libDaisy's stock one. Two reasons, and
+# the second is not optional:
+#
+#   1. Capacity - pstretch (~291 KB of static data), bard and graincloud all overflow the stock
+#      script's 128 KB DTCMRAM .bss region.
+#   2. THE SD CARD DOES NOT WORK OTHERWISE. libDaisy's own note in src/sys/fatfs.h: "The SDMMC1
+#      peripheral can only communicate with the AXI SRAM, and the DTCMRAM cannot communicate with the
+#      DMA. So the FatFSInterface object should always be located in the AXI SRAM... applications
+#      using the electrosmith bootloader will need special consideration." A BOOT_SRAM app is exactly
+#      that case: the stock script puts .bss in DTCMRAM, so a statically-allocated FatFSInterface
+#      lands in memory the SDMMC DMA cannot reach. The card initialises, then every read returns
+#      FR_DISK_ERR - which looks like a broken card rather than a placement bug.
+#
+# BOOT_QSPI builds (mosc) keep libDaisy's QSPI script, which already places .bss in AXI SRAM.
+ifeq ($(APP_TYPE),BOOT_SRAM)
+LDSCRIPT ?= ../linker/sram_bss_in_axi.lds
 endif
 
 # The contract headers use std::clamp; libDaisy defaults to gnu++14.

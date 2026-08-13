@@ -110,12 +110,28 @@ nothing" and "these three files are in the wrong WAV format" stop being the same
 | CTRL 1-4 | the four parameters of the current page, with value pickup |
 | encoder turn | change page |
 | encoder click | dual-deck engine: switch deck A/B. Otherwise: cycle `ConfigId::Mode` |
+| **encoder long press** (~0.6 s, no turn) | **play / pause** (`IEngine::on_play_pad`) |
 | encoder hold + turn | `CapAux` engine: scroll its Aux selector. Otherwise: set the internal tempo |
 | GATE IN 1 | trigger the focused deck (`IEngine::on_gate_trigger`) |
 | GATE IN 2 | external clock - quarter-note pulses steer the transport tempo |
 | MIDI IN | forwarded whole, plus decoded NoteOn and start/stop |
 | CV OUT 1/2 | `IEngine::process_cv`, block-rate, bipolar mapped onto the 0-5 V output |
 | GATE OUT | `IEngine::gate_out_triggered` on the focused deck |
+
+### Play, and the header status
+
+The Patch has no buttons, so play/pause is a **long press** of the encoder — hold about a second
+without turning, and release. A short click still switches deck; hold-and-turn is still the Aux
+selector. Boards that do have buttons (Pod, patch.init()) map button 0 to play and button 1 to
+play-with-`reverse`, which engines read as their second gesture (bard jumps back 15 s).
+
+This matters more than it sounds: several engines start idle by design. bard boots paused, being a
+resume-where-you-left-off player, so without a play control it looks broken rather than stopped.
+
+The top-right of the header shows two characters of state instead of the tempo: `P` or `-` for whether
+the SD stream deck is actually playing a file, and a count of play-presses. That distinguishes "the
+gesture never arrived" from "the engine chose to stay silent" from "a file is streaming but you cannot
+hear it" — which took four flashes to establish the first time, by inference.
 
 ### CV inputs
 

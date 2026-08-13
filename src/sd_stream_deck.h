@@ -41,7 +41,12 @@ public:
     int read_text(const char* path, char* buf, int max) const override
     {
         if (!buf || max <= 0) return 0;
-        FIL f;
+        // STATIC, not a local. A FatFs FIL carries a 512-byte sector buffer that the SDMMC DMA writes
+        // into directly, and the DMA cannot reach DTCMRAM - which is where the stack lives under the
+        // BOOT_SRAM linker script (_estack = 0x20020000). A stack FIL therefore fails every read with
+        // FR_DISK_ERR. As a static it lands in .bss, which the repo's linker script places in AXI SRAM.
+        // Safe as a static because every caller is main-loop only, single-threaded, and not reentrant.
+        static FIL f;
         if (f_open(&f, path, FA_READ) != FR_OK) { buf[0] = '\0'; return 0; }
         UINT got = 0;
         f_read(&f, buf, static_cast<UINT>(max - 1), &got);

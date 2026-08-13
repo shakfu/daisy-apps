@@ -13,6 +13,10 @@
 //   CTRL 1-4          the four params of the current page, with value pickup
 //   encoder turn      change page
 //   encoder click     dual-deck engine: switch deck A/B.  Otherwise: cycle ConfigId::Mode.
+//   encoder LONG press PLAY/PAUSE (IEngine::on_play_pad). The Patch has no buttons, so without this
+//                     gesture the play surface is unreachable - and engines that start idle by design
+//                     (bard boots paused) look broken rather than stopped.
+//   buttons           where a board has them (Pod, patch.init()): 0 = play, 1 = play with `reverse`
 //   encoder hold+turn CapAux engine: scroll its Aux selector (upstream's Alt+PITCH gesture).
 //                     Otherwise: set the internal tempo.
 //   GATE IN 1         trigger the focused deck (IEngine::on_gate_trigger)
@@ -30,6 +34,7 @@
 // shape still runs - it is just a two-knob view of page 1.
 
 #include <cmath>
+#include <cstdio>
 
 #include "daisy_seed.h"
 
@@ -112,9 +117,9 @@ static daisyapps::ParamUI<daisyapps::Board> ui;
 static constexpr uint32_t kStreamRingBytes    = 1u * 1024u * 1024u;
 static constexpr uint32_t kStreamScratchBytes = 32u * 1024u;
 
-static uint8_t DSY_SDRAM_BSS alignas(32) s_ring_a[kStreamRingBytes];
-static uint8_t DSY_SDRAM_BSS alignas(32) s_ring_b[kStreamRingBytes];
-static uint8_t DSY_SDRAM_BSS alignas(32) s_stream_scratch[kStreamScratchBytes];
+alignas(32) static uint8_t DSY_SDRAM_BSS s_ring_a[kStreamRingBytes];
+alignas(32) static uint8_t DSY_SDRAM_BSS s_ring_b[kStreamRingBytes];
+alignas(32) static uint8_t DSY_SDRAM_BSS s_stream_scratch[kStreamScratchBytes];
 
 static daisyapps::SdCard     s_card;
 static daisyapps::StreamDeck s_stream;
@@ -126,6 +131,11 @@ static daisyapps::SdStreamDeck s_stream;
 static volatile float s_cv[2] = {0.f, 0.f};
 
 static daisyapps::DeckRef::Ref s_deck = daisyapps::DeckRef::A;
+
+// How many times the play gesture has fired. On screen next to the stream state, because "nothing
+// happens" has two very different causes: the gesture never reached the engine, or it did and the
+// engine chose to stay silent.
+static int s_play_presses = 0;
 
 // Daisy's non-interleaving buffers are already de-interleaved (InputBuffer = const float* const*,
 // OutputBuffer = float**), which is exactly IEngine::process's shape - forward straight through.
@@ -208,18 +218,25 @@ int main(void)
     using daisyapps::DeckRef;
 
     daisyapps::Controls controls;
-    bool  prev_gate[daisyapps::Controls::kMaxGates] = {false, false};
-    bool  enc_was_held = false;
-    bool  enc_turned   = false;   // a turn while held is a gesture, not a click
-    int   mode_config  = 0;
-    float aux          = 0.f;     // the CapAux selector position (0..1), scrolled by hold+turn
+    bool     prev_gate[daisyapps::Controls::kMaxGates]     = {false, false};
+    bool     prev_button[daisyapps::Controls::kMaxButtons] = {false, false, false, false};
+    bool     enc_was_held  = false;
+    bool     enc_turned    = false;   // a turn while held is a gesture, not a click
+    uint32_t enc_press_ms  = 0;       // when the current hold started, for the long-press gesture
+    int      mode_config   = 0;
+    float    aux           = 0.f;     // the CapAux selector position (0..1), scrolled by hold+turn
     // Deadband reference per CV input. Seeded to 0.5 (the neutral mid-scale reading) rather than 0, so
     // an unpatched jack sitting at centre does not fire a spurious write on the first pass.
-    float cv_last[4]   = {0.5f, 0.5f, 0.5f, 0.5f};
+    float    cv_last[4]    = {0.5f, 0.5f, 0.5f, 0.5f};
+
+    // How long a hold has to last to read as PLAY rather than a click. Long enough not to fire on a
+    // deliberate click, short enough not to feel like a wait.
+    constexpr uint32_t kLongPressMs = 600;
 
     while (1) {
         board.Poll(controls);
         transport.poll();
+        const uint32_t now_ms = time_source.now_ms();
 
 #if defined(SPK_USE_STREAM)
         // The slow half of streaming: refill each playing deck's ring from the card and drain each
@@ -250,9 +267,24 @@ int main(void)
             prev_gate[g] = now;
         }
 
+        // --- Buttons: the play/record pad surface ------------------------------------------------
+        // Upstream drives these from dedicated Play/Rev pads. A board with buttons gets them here:
+        // button 0 is PLAY, button 1 is the same pad with `reverse` set, which engines read as their
+        // second gesture (bard: jump back 15 s; a looper: reverse playback). Rising edges only.
+        for (int b = 0; b < controls.button_count && b < daisyapps::Controls::kMaxButtons; b++) {
+            const bool down = controls.button[b];
+            if (down && !prev_button[b]) {
+                if (b == 0)      engine.on_play_pad(s_deck, false);
+                else if (b == 1) engine.on_play_pad(s_deck, true);
+            }
+            prev_button[b] = down;
+        }
+
         // --- Encoder ----------------------------------------------------------------------------
         const bool held = controls.enc_press;
         const int  inc  = controls.enc_inc;
+
+        if (held && !enc_was_held) enc_press_ms = now_ms;
 
         if (held) {
             if (inc != 0) {
@@ -272,9 +304,16 @@ int main(void)
             if (enc_was_held) {
                 engine.set_aux_active(s_deck, false);
                 if (!enc_turned) {
-                    // A click. Dual-deck engines switch deck; the rest cycle their Mode config, which
-                    // is the switch position upstream's panel would have provided.
-                    if (engine.capabilities() & daisyapps::CapDualDeck) {
+                    if (now_ms - enc_press_ms >= kLongPressMs) {
+                        // LONG PRESS = PLAY. The Daisy Patch has no buttons at all, so without this
+                        // there is no way to reach on_play_pad - and several engines start idle by
+                        // design (bard boots paused, being a resume-where-you-left-off player), which
+                        // makes them look broken rather than stopped.
+                        engine.on_play_pad(s_deck, false);
+                        s_play_presses++;
+                    } else if (engine.capabilities() & daisyapps::CapDualDeck) {
+                        // A click. Dual-deck engines switch deck; the rest cycle their Mode config,
+                        // which is the switch position upstream's panel would have provided.
                         s_deck = (s_deck == DeckRef::A) ? DeckRef::B : DeckRef::A;
                         ui.set_deck(s_deck, engine);
                     } else {
@@ -327,6 +366,10 @@ int main(void)
 
         // Rate-limited inside render(): the OLED blit is ~1 KB over SPI and has no business running at
         // main-loop speed.
-        ui.render(board, engine, SPK_ENGINE_STR, transport.tempo(), time_source.now_ms());
+        // Header status: stream state + play-press count, e.g. "P4:2" (playing, deck A, 2 presses).
+        char status[12];
+        std::snprintf(status, sizeof(status), "%c%d",
+                      s_stream.is_playing(s_deck) ? 'P' : '-', s_play_presses % 10);
+        ui.render(board, engine, SPK_ENGINE_STR, transport.tempo(), now_ms, status);
     }
 }

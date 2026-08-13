@@ -225,7 +225,37 @@ One capability remains unserved: `CapWavCues`. The parser exists (`memory/wav.h`
 but nothing calls it after a load, so an engine declaring that bit would get no markers. No engine in
 the set declares it today.
 
-### 5.1 Card content
+### 5.1 The DTCMRAM trap (read this before debugging any SD problem)
+
+**The SDMMC DMA cannot access DTCMRAM.** libDaisy says so in `src/sys/fatfs.h`, and under the
+Electrosmith bootloader it is a live hazard rather than a footnote, because libDaisy's stock BOOT_SRAM
+linker script puts **both `.bss` and the stack** in DTCMRAM. Anything FatFs hands to the DMA must
+therefore live in AXI SRAM:
+
+- **The `FatFSInterface` object** (it holds the FATFS window buffer). As a static it lands in `.bss`,
+  so `.bss` has to be in AXI SRAM - which is why `linker/sram_bss_in_axi.lds` is the default LDSCRIPT
+  for every BOOT_SRAM build here, not a per-engine exception.
+- **Every `FIL` / `FatFile`**, because a `FIL` carries a 512-byte sector buffer the DMA writes into
+  directly. A local one is on the stack and therefore broken. Declare them `static` (all the call
+  sites here are main-loop only and non-reentrant) or otherwise place them in AXI SRAM.
+
+`DIR` is fine: `f_readdir` buffers through the FATFS window rather than its own.
+
+What makes this expensive is that it does not look like one bug. The same root cause appeared four
+times during bring-up, each wearing a different mask:
+
+| Symptom | Actually |
+|---|---|
+| `f_mount` returns `FR_DISK_ERR` (not `FR_NOT_READY`) | the FATFS window was in DTCMRAM |
+| every `.wav` reports a bad/unreadable header | the probing `FIL` was on the stack |
+| `read_text` / `write_text` silently return nothing | same, in `StreamDeck` |
+| an engine ignores play and stays silent | `scan_bank` skipped every file whose header it could not read, so the bank was empty |
+
+The tell is `FR_DISK_ERR` **with the peripheral reporting OK**: it means the card was detected and
+initialised and only the data transfer failed. A truly absent card gives `FR_NOT_READY`. If you see
+disk errors at every bus width and speed, stop suspecting the card and check where the buffer lives.
+
+### 5.2 Card content
 
 `scripts/make_sd_content.py` generates test audio for every streaming engine, in each one's layout and
 format, and `make sd-card` copies it to a card. When porting another engine that reads from a card, add

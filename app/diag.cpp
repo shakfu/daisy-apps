@@ -142,10 +142,15 @@ static uint32_t rd32(const uint8_t* p)
 }
 
 // Minimal chunk walk: enough to recover (format, channels, rate, bits) from a canonical WAV.
-static bool wav_fmt(const char* path, uint16_t& fmt, uint16_t& ch, uint32_t& rate, uint16_t& bits)
+static bool wav_fmt(const char* path, uint16_t& fmt, uint16_t& ch, uint32_t& rate, uint16_t& bits,
+                    bool& opened)
 {
-    FIL f;
+    // STATIC, not a local: a FIL carries a 512-byte sector buffer the SDMMC DMA writes into, and the
+    // DMA cannot reach DTCMRAM, where the stack lives. A stack FIL fails every read (see sd_card.h).
+    static FIL f;
+    opened = false;
     if (f_open(&f, path, FA_READ) != FR_OK) return false;
+    opened = true;
     uint8_t hdr[12];
     UINT got = 0;
     bool ok = false;
@@ -203,9 +208,11 @@ static void check_file(const char* dir, const char* name, bool format_a)
     if (size < 32u * 1024u) {
         fc.ok = false; std::snprintf(fc.verdict, sizeof(fc.verdict), "under 32K floor");
     } else if (is_wav) {
-        uint16_t fmt = 0, ch = 0, bits = 0; uint32_t rate = 0;
-        if (!wav_fmt(path, fmt, ch, rate, bits)) {
-            fc.ok = false; std::snprintf(fc.verdict, sizeof(fc.verdict), "bad wav header");
+        uint16_t fmt = 0, ch = 0, bits = 0; uint32_t rate = 0; bool opened = false;
+        if (!wav_fmt(path, fmt, ch, rate, bits, opened)) {
+            fc.ok = false;
+            std::snprintf(fc.verdict, sizeof(fc.verdict),
+                          opened ? "no fmt chunk" : "cannot open/read");
         } else if (ch != 1) {
             fc.ok = false; std::snprintf(fc.verdict, sizeof(fc.verdict), "%u ch, need mono", ch);
         } else if (format_a && (fmt != 3 || bits != 32 || rate != 48000)) {
@@ -246,7 +253,11 @@ static void rescan_card()
 {
     s_file_count = 0;
     if (!s_sd_mounted) {
-        std::snprintf(s_sd_note, sizeof(s_sd_note), "no card / mount failed");
+        // Say WHY. "not mounted" alone sends people to the wrong problem; the FatFs result
+        // distinguishes an unreadable/absent card from a card whose filesystem FatFs will not accept.
+        std::snprintf(s_sd_note, sizeof(s_sd_note), "sdmmc %s  1b:%d 4b:%d 4bF:%d",
+                      card.init_ok() ? "ok" : "FAIL",
+                      card.attempt(0), card.attempt(1), card.attempt(2));
         return;
     }
     for (unsigned i = 0; i < sizeof(kDirsA) / sizeof(kDirsA[0]); i++) scan_dir(kDirsA[i], true, 1);
@@ -343,8 +354,17 @@ static void draw(int page, const daisyapps::Controls& c, uint32_t now_ms)
         }
 
         case P_SD: {
-            board.ScreenText(0, 14, s_sd_mounted ? "mounted" : "NOT MOUNTED", true);
+            if (s_sd_mounted) {
+                std::snprintf(line, sizeof(line), "mounted (%d-bit)", card.width_bits());
+                board.ScreenText(0, 14, line, true);
+            } else {
+                board.ScreenText(0, 14, "NOT MOUNTED", true);
+            }
             board.ScreenText(0, 24, s_sd_note, true);
+            if (!s_sd_mounted) {
+                std::snprintf(line, sizeof(line), "%.20s", daisyapps::SdCard::fres_text(card.fres()));
+                board.ScreenText(0, 32, line, true);
+            }
             if (s_file_count) {
                 if (s_file_cursor >= s_file_count) s_file_cursor = 0;
                 const FileCheck& fc = s_files[s_file_cursor];
@@ -353,7 +373,7 @@ static void draw(int page, const daisyapps::Controls& c, uint32_t now_ms)
                 std::snprintf(line, sizeof(line), "%s %.28s", fc.ok ? "OK " : "BAD", fc.verdict);
                 board.ScreenText(0, 48, line, true);
             }
-            board.ScreenText(0, 56, "click: next file", true);
+            board.ScreenText(0, 56, s_sd_mounted ? "click: next file" : "click: retry mount", true);
             break;
         }
 
@@ -452,7 +472,12 @@ int main(void)
         if (prev_press && !controls.enc_press) {
             switch (page) {
                 case P_DIGITAL: s_gate_edges[0] = s_gate_edges[1] = 0; break;
-                case P_SD:      if (s_file_count) s_file_cursor = (s_file_cursor + 1) % s_file_count; break;
+                case P_SD:
+                    // Nothing mounted -> retry the mount, so a card can be inserted and tested without
+                    // a power cycle. Mounted -> step through the scanned files.
+                    if (!s_sd_mounted) { s_sd_mounted = card.Mount(); rescan_card(); }
+                    else if (s_file_count) s_file_cursor = (s_file_cursor + 1) % s_file_count;
+                    break;
                 case P_AUDIO:   s_tone_on = !s_tone_on; break;
                 case P_OUT:     s_cv_sweep = !s_cv_sweep; break;
                 case P_SYS:     rescan_card(); break;

@@ -178,6 +178,27 @@ under **Unreleased**.
   `RELEASE_ENGINES` / `RELEASE_BOARDS` restrict the matrix to a subset (e.g. a single board or pair),
   `VERSION` sets the version, and `WITH_HEX=1` also emits `.hex` artifacts.
 
+### Fixed
+
+- **The SD card never worked on a BOOT_SRAM build, in four places at once.** The SDMMC DMA cannot
+  access DTCMRAM, and libDaisy's stock BOOT_SRAM linker script puts both `.bss` and the stack there —
+  so every FatFs buffer handed to the DMA was unreachable. Found on hardware during Daisy Patch
+  bring-up, where it presented as four unrelated-looking faults: the card would not mount
+  (`FR_DISK_ERR` at every bus width), every `.wav` reported a bad header, `read_text`/`write_text`
+  returned nothing, and `scan_bank` silently skipped every file — which made engines look like they
+  were ignoring the play control. Fixes: `linker/sram_bss_in_axi.lds` is now the default LDSCRIPT for
+  every BOOT_SRAM build (it was a per-engine exception for memory overflow), and the `FIL`/`FatFile`
+  objects in `sd_stream_deck.h`, `StreamDeck::read_text` / `write_text` / `scan_bank` and the
+  diagnostic are `static` rather than stack-allocated. Documented in the porting guide, section 5.1.
+- **The play/record surface was unreachable on every board.** `IEngine::on_play_pad` was never called
+  and `controls.button[]` never read, so engines that start idle by design — bard boots paused, being
+  a resume-where-you-left-off player — looked broken rather than stopped. The Daisy Patch has no
+  buttons at all, so it now gets a long-press-the-encoder gesture for play/pause; boards with buttons
+  map button 0 to play and button 1 to play-with-reverse.
+- `alignas(32)` after `DSY_SDRAM_BSS` on the streaming rings was silently discarded by GCC ("appertains
+  to a type-specifier"). The section attribute was applied correctly — the rings were always in SDRAM —
+  but the alignment request was not. Moved ahead of the declaration.
+
 ### Changed
 
 - **The engine contract is now a full copy of upstream's, not a trimmed subset.** `iengine.h`,

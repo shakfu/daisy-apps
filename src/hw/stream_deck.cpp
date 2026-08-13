@@ -180,7 +180,11 @@ int StreamDeck::scan_bank(const char* dir, BankEntry* out, int max) const {
             // that is not 16-bit mono PCM. One f_open per WAV at bank load - off the audio path.
             char path[64];
             if (!join_path(dir, name, path, sizeof(path))) continue;
-            FatFile wf;
+            // STATIC for the DMA reason documented on read_text: a FatFile holds a FIL, whose
+            // 512-byte sector buffer the SDMMC DMA writes into, and the stack is in DTCMRAM which the
+            // DMA cannot reach. As a local this open fails for EVERY .wav, so every wav station is
+            // skipped and the bank comes back empty - which presents as an engine that ignores play.
+            static FatFile wf;
             if (!wf.open_read(path)) continue;
             RawStreamReader probe;
             const bool ok = probe.begin_wav(&wf, static_cast<uint32_t>(fno.fsize), rate);
@@ -208,7 +212,11 @@ int StreamDeck::scan_bank(const char* dir, BankEntry* out, int max) const {
 // opened/closed here - read at boot before any deck streams, so it never races a deck file. Main-loop only.
 int StreamDeck::read_text(const char* path, char* buf, int max) const {
     if (max <= 0) return 0;
-    FatFile f;
+    // STATIC, not a local. FatFile holds a FIL by value, and a FIL carries the 512-byte sector buffer
+    // the SDMMC DMA writes into - which cannot live on the stack, because the stack is in DTCMRAM and
+    // the SDMMC DMA cannot reach it (libDaisy src/sys/fatfs.h says as much). A stack FatFile fails
+    // every read with FR_DISK_ERR. Main-loop only and non-reentrant, so a static is safe.
+    static FatFile f;
     if (!f.open_read(path)) { buf[0] = '\0'; return 0; }   // missing -> empty
     const uint32_t got = f.read(buf, static_cast<uint32_t>(max - 1));
     f.close();
@@ -222,7 +230,8 @@ int StreamDeck::read_text(const char* path, char* buf, int max) const {
 // the caller treats that as "persistence unavailable" and keeps playing.
 bool StreamDeck::write_text(const char* path, const char* buf, int n) {
     if (n < 0) return false;
-    FatFile f;
+    static FatFile f;   // static for the same DMA reason as read_text above
+
     if (!f.open_write(path)) return false;
     const uint32_t want = static_cast<uint32_t>(n);
     const uint32_t put  = want ? f.write(buf, want) : 0u;

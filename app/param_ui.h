@@ -117,7 +117,12 @@ public:
 
     // Draw the page. Rate-limited internally; safe to call every main-loop pass. `engine_name` is the
     // build's engine (SPK_ENGINE_STR), `bpm` and `deck` come from the harness.
-    void render(Board& board, IEngine& engine, const char* engine_name, float bpm, uint32_t now_ms)
+    // `status` is an optional short string drawn right-aligned in the header instead of the tempo.
+    // The harness uses it for state the engine does not expose as a param - for a streaming engine,
+    // whether the stream deck is actually playing, which is the difference between "the engine is
+    // silent" and "the engine never started a file".
+    void render(Board& board, IEngine& engine, const char* engine_name, float bpm, uint32_t now_ms,
+                const char* status = nullptr)
     {
         if (!Board::kHasScreen) return;
         if (now_ms - _last_draw_ms < static_cast<uint32_t>(1000 / kScreenHz)) return;
@@ -134,8 +139,13 @@ public:
         else
             std::snprintf(line, sizeof(line), "%s %d/%d", engine_name, _page + 1, _pages ? _pages : 1);
         board.ScreenText(0, 0, line, true);
-        std::snprintf(line, sizeof(line), "%3d", static_cast<int>(bpm + 0.5f));
-        board.ScreenText(Board::kScreenWidth - 18, 0, line, true);
+        if (status && *status) {
+            const int w = static_cast<int>(std::strlen(status)) * 6;
+            board.ScreenText(Board::kScreenWidth - w - 1, 0, status, true);
+        } else {
+            std::snprintf(line, sizeof(line), "%3d", static_cast<int>(bpm + 0.5f));
+            board.ScreenText(Board::kScreenWidth - 18, 0, line, true);
+        }
 
         // One row per knob: name, value, and a bar. An uncaught knob is marked with '.' before its
         // name and gets a caret on the bar at the knob's physical position, so the gap you have to
