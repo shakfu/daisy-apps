@@ -12,11 +12,13 @@
 // Panel (Daisy Patch):
 //   CTRL 1-4          the four params of the current page, with value pickup
 //   encoder turn      change page
-//   encoder click     dual-deck engine: switch deck A/B.  Otherwise: cycle ConfigId::Mode.
-//   encoder LONG press PLAY/PAUSE (IEngine::on_play_pad). The Patch has no buttons, so without this
-//                     gesture the play surface is unreachable - and engines that start idle by design
-//                     (bard boots paused) look broken rather than stopped.
-//   buttons           where a board has them (Pod, patch.init()): 0 = play, 1 = play with `reverse`
+//   encoder click     open the ACTION SCREEN (app/param_ui.h), then one click per row: play, rec,
+//                     alt, deck A/B, and the engine's categorical switches. The Patch has no buttons
+//                     at all, so this is the only way to reach IEngine's pad and switch surface - and
+//                     several engines are inert without it (granular has no audio until it records;
+//                     bard boots paused; reverb ships as one of its three algorithms).
+//   buttons           where a board has them (Pod, patch.init()): 0 = play, 1 = record. Those boards
+//                     have no screen to put a list on, so their click keeps its direct meaning.
 //   encoder hold+turn CapAux engine: scroll its Aux selector (upstream's Alt+PITCH gesture).
 //                     Otherwise: set the internal tempo.
 //   GATE IN 1         trigger the focused deck (IEngine::on_gate_trigger)
@@ -107,7 +109,8 @@ static daisyapps::Board            board;
 static daisyapps::ActiveEngine     engine;
 static daisyapps::SystemTime       time_source;
 static daisyapps::HarnessTransport transport(time_source);
-static daisyapps::ParamUI<daisyapps::Board> ui;
+using HarnessUI = daisyapps::ParamUI<daisyapps::Board>;
+static HarnessUI ui;
 
 #if defined(SPK_USE_STREAM)
 // Streaming build. One read-ahead / write-behind ring PER DECK - a deck is play-XOR-record, so one ring
@@ -208,7 +211,11 @@ int main(void)
 
     const int param_inputs = kCvBase;
     const int knobs        = (param_inputs >= 4) ? 4 : param_inputs;
-    ui.init(engine, knobs);
+    // Which of IEngine's optional pads this engine implements, measured at compile time from the
+    // concrete type (app/engine_pads.h). This is the one place in the firmware that names ActiveEngine
+    // besides its construction, and the only place the answer is available: everything downstream
+    // holds an IEngine& and could not tell a play pad from a no-op.
+    ui.init(engine, knobs, daisyapps::pad_mask<daisyapps::ActiveEngine>());
 
     board.StartAudio(AudioCallback);
     board.StartMidi();
@@ -217,21 +224,24 @@ int main(void)
     using daisyapps::ConfigId;
     using daisyapps::DeckRef;
 
+    // The action screen's `clk in` row cycles an index; this side owns what the index MEANS. The two
+    // tables are written in the same order and are checked to be the same length, because a silent
+    // mismatch here would read a 1/16 clock as quarters and be four times out on every tempo.
+    static_assert(HarnessUI::kClockInCount
+                      == static_cast<int>(sizeof(daisyapps::HarnessTransport::kExtPpqChoices)),
+                  "param_ui's clock-input labels and HarnessTransport::kExtPpqChoices disagree");
+    int clock_in_applied = -1;
+
     daisyapps::Controls controls;
     bool     prev_gate[daisyapps::Controls::kMaxGates]     = {false, false};
     bool     prev_button[daisyapps::Controls::kMaxButtons] = {false, false, false, false};
     bool     enc_was_held  = false;
     bool     enc_turned    = false;   // a turn while held is a gesture, not a click
-    uint32_t enc_press_ms  = 0;       // when the current hold started, for the long-press gesture
-    int      mode_config   = 0;
+    int      mode_config   = 0;       // screenless boards only: the click's Mode cycle position
     float    aux           = 0.f;     // the CapAux selector position (0..1), scrolled by hold+turn
     // Deadband reference per CV input. Seeded to 0.5 (the neutral mid-scale reading) rather than 0, so
     // an unpatched jack sitting at centre does not fire a spurious write on the first pass.
     float    cv_last[4]    = {0.5f, 0.5f, 0.5f, 0.5f};
-
-    // How long a hold has to last to read as PLAY rather than a click. Long enough not to fire on a
-    // deliberate click, short enough not to feel like a wait.
-    constexpr uint32_t kLongPressMs = 600;
 
     while (1) {
         board.Poll(controls);
@@ -268,14 +278,19 @@ int main(void)
         }
 
         // --- Buttons: the play/record pad surface ------------------------------------------------
-        // Upstream drives these from dedicated Play/Rev pads. A board with buttons gets them here:
-        // button 0 is PLAY, button 1 is the same pad with `reverse` set, which engines read as their
-        // second gesture (bard: jump back 15 s; a looper: reverse playback). Rising edges only.
+        // Upstream drives these from dedicated Play/Rev/Rec pads. A board with buttons gets two of
+        // them: button 0 is PLAY, button 1 is RECORD. Rising edges only.
+        //
+        // Button 1 used to be the play pad's `reverse` flavour, which meant on_record_pad was called
+        // by nothing on any board - and record is the whole point of tape, shuttle and softcut, while
+        // granular and graincloud have NO other way to get audio into a deck and were silent from
+        // boot. Reverse is a flavour; record is the feature, so it wins the button. On the Patch both
+        // live in the action screen and nothing is traded away.
         for (int b = 0; b < controls.button_count && b < daisyapps::Controls::kMaxButtons; b++) {
             const bool down = controls.button[b];
             if (down && !prev_button[b]) {
                 if (b == 0)      engine.on_play_pad(s_deck, false);
-                else if (b == 1) engine.on_play_pad(s_deck, true);
+                else if (b == 1) engine.on_record_pad(s_deck, false);
             }
             prev_button[b] = down;
         }
@@ -284,7 +299,7 @@ int main(void)
         const bool held = controls.enc_press;
         const int  inc  = controls.enc_inc;
 
-        if (held && !enc_was_held) enc_press_ms = now_ms;
+        ui.tick(now_ms);   // an action screen left open eventually hands the encoder back to the pages
 
         if (held) {
             if (inc != 0) {
@@ -304,25 +319,38 @@ int main(void)
             if (enc_was_held) {
                 engine.set_aux_active(s_deck, false);
                 if (!enc_turned) {
-                    if (now_ms - enc_press_ms >= kLongPressMs) {
-                        // LONG PRESS = PLAY. The Daisy Patch has no buttons at all, so without this
-                        // there is no way to reach on_play_pad - and several engines start idle by
-                        // design (bard boots paused, being a resume-where-you-left-off player), which
-                        // makes them look broken rather than stopped.
-                        engine.on_play_pad(s_deck, false);
-                        s_play_presses++;
-                    } else if (engine.capabilities() & daisyapps::CapDualDeck) {
-                        // A click. Dual-deck engines switch deck; the rest cycle their Mode config,
-                        // which is the switch position upstream's panel would have provided.
-                        s_deck = (s_deck == DeckRef::A) ? DeckRef::B : DeckRef::A;
-                        ui.set_deck(s_deck, engine);
+                    // A CLICK. On a board with a screen it drives the ACTION SCREEN (param_ui.h):
+                    // the first click opens the list, every further click fires the highlighted row.
+                    // That is the whole of IEngine's non-knob surface - the play/record pads and the
+                    // categorical switches - on the one button a Daisy Patch has.
+                    //
+                    // A screenless board (Pod, patch.init()) would be entering an invisible mode, so
+                    // there the click keeps its direct meaning: switch deck on a dual-deck engine,
+                    // else cycle Mode. Those boards reach the pads through their buttons instead.
+                    if constexpr (daisyapps::Board::kHasScreen) {
+                        if (!ui.in_actions()) {
+                            ui.open_actions(engine, now_ms);
+                        } else {
+                            const daisyapps::ActionRow::Kind fired = ui.fire(engine, now_ms);
+                            if (fired == daisyapps::ActionRow::Play) s_play_presses++;
+                            s_deck = ui.deck();   // the `deck` row moves the focus the UI owns
+                        }
                     } else {
-                        mode_config = (mode_config + 1) % 3;
-                        engine.set_config(ConfigId::Mode, s_deck, mode_config);
+                        if (engine.capabilities() & daisyapps::CapDualDeck) {
+                            s_deck = (s_deck == DeckRef::A) ? DeckRef::B : DeckRef::A;
+                            ui.set_deck(s_deck, engine);
+                        } else {
+                            mode_config = (mode_config + 1) % 3;
+                            engine.set_config(ConfigId::Mode, s_deck, mode_config);
+                        }
                     }
                 }
             }
-            if (inc != 0) ui.set_page(ui.page() + inc, engine);
+            // A turn moves the action cursor while the list is open, and the page otherwise.
+            if (inc != 0) {
+                if (ui.in_actions()) ui.move_cursor(inc, now_ms);
+                else                 ui.set_page(ui.page() + inc, engine);
+            }
             enc_turned = false;
         }
         enc_was_held = held;
@@ -351,6 +379,13 @@ int main(void)
                 case 3: engine.cv_crossfade(bipolar); break;                        // global, not per-deck
                 default: break;
             }
+        }
+
+        // Push the clock-input rate when the action screen's row moves. Polled rather than pushed from
+        // the UI so param_ui.h stays ignorant of the transport - it cycles an index and nothing else.
+        if (ui.clock_in() != clock_in_applied) {
+            clock_in_applied = ui.clock_in();
+            transport.set_ext_ppq(daisyapps::HarnessTransport::kExtPpqChoices[clock_in_applied]);
         }
 
         // An engine that repointed a deck's knobs (edrums' drum swap) invalidates the pickup cache.

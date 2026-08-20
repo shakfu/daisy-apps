@@ -102,6 +102,56 @@ Both mount through the shared `src/sd_card.h`. `hw/stream_deck.cpp` and `hw/fat_
 in `#if defined(SPK_USE_STREAM)` and compile to nothing without it, so a non-streaming engine's build
 is byte-identical to one where they were never listed.
 
+### 2.4 The control surface an engine actually gets
+
+A port compiles the moment the build glue is in place, and that is where it is easy to stop. It is also
+where the expensive bugs live, because the harness reaches an engine through three separate channels
+with three different sources of truth, and a method that no channel calls is indistinguishable, on the
+bench, from an engine that does not work.
+
+| Channel | What it drives | Where the harness learns what exists |
+|---|---|---|
+| Continuous params | the four knobs, paged, with value pickup | `live_params()` + `param_label()` |
+| Pads and switches | the **action screen** (encoder click) | the pad mask (below) + `live_configs()` + `CapDualDeck` |
+| Everything else | gates in, MIDI in, CV in/out, transport | fixed wiring in `harness.cpp` |
+
+The second row is the one that bites. `IEngine`'s pads (`on_play_pad`, `on_record_pad`, the `on_seq_*`
+group, `set_fx`) all have no-op default bodies, and `capabilities()` has no bit for most of them, so an
+engine cannot be *asked* what it implements in the way it can be asked which params it consumes. Before
+the action screen existed the harness simply did not call most of them, and the results all looked like
+DSP faults:
+
+| Symptom on the bench | Actually |
+|---|---|
+| `granular` and `graincloud` are silent from boot, forever | `on_record_pad` had no caller on any board, and recording is their only way to get audio into a deck |
+| `tape`, `shuttle`, `softcut` play but will not record | same cause |
+| `reverb` has one algorithm, not three | `ConfigId::Mode` was unreachable on any `CapDualDeck` engine - the click had to be the deck switch |
+| `pstretch` ignores the clips on the card | its `Mode` switch is the source selector, same cause |
+| `bard` does nothing at all | it boots paused by design, and the play pad had no route |
+
+So the check that matters when porting is not "does it build" but **can every method this engine
+implements be reached from the panel**. The action screen answers most of it automatically - see 4.3.
+
+**How the harness knows which pads exist.** `app/engine_pads.h` measures it instead of asking. For an
+inherited member, `&Derived::f` has type `R (Base::*)(...)`; only a class that declares `f` makes it
+`R (Derived::*)(...)`. Comparing those two types folds to a constant at build time, where the concrete
+`ActiveEngine` is known, and yields a bitmask the action screen builds its rows from. It costs nothing
+at runtime, assumes nothing about vtable layout, and - the point - has nothing to keep in sync. The
+declarative alternative had already drifted: `tape` and `shuttle` implemented `on_record_pad` for their
+whole life here while declaring no `CapRecording`. A `static_assert` that the base class's own mask is
+zero catches the one way the trait can go quietly wrong, which is a signature in that header ceasing to
+match `IEngine`'s.
+
+What the trait cannot tell you is whether an implementation *does* anything. An engine that declares a
+pad and returns immediately still gets a row. That error is a spare line on a screen; the error it
+replaced was a hidden feature.
+
+**Board differences are not cosmetic here.** The action screen is a screen affordance, so it exists on
+the Daisy Patch only. The Pod keeps a direct click (deck switch, else cycle `Mode`) and puts the pads on
+its two buttons - 0 play, 1 record. patch.init() has no encoder at all, so its two buttons and two
+gate inputs are the whole of its discrete control. An engine whose only route to a feature is a pad row is therefore reachable on
+the Patch and not on patch.init(), which is worth knowing before concluding a board is broken.
+
 ## 3. Portability tiers
 
 Engines group by their heaviest dependency. "In-tree deps" means source you copy into the repo (no
@@ -115,10 +165,12 @@ external build); "cross-built lib" means a separate toolchain step.
 | **3 - SD audio streaming** | `tape`, `radio`, `pstretch`, `softcut`, `bard`, `shuttle` | SRAM | none | **yes** | **ported** |
 | **4 - external cross-built lib** | `csound`, `chuck` | QSPI | `libcsound.a` / `libchuck.a` | yes | **done**, own harnesses in `pod/` |
 
-**Every engine in the upstream set is now ported.** What remains is not porting but polish: the
-`granular` / `graincloud` IEngine surface is wide enough (recording, sequencer, tape storage, launch
-quantization) that four knobs and one encoder cannot reach all of it, so those two would benefit from
-UI work beyond the generic pager.
+**Every engine in the upstream set is now ported.** What remains is not porting but polish. The
+`granular` / `graincloud` surface is the widest in the set - recording, a step sequencer, tape storage,
+launch quantization, two FX layers - and for a while none of it was reachable from four knobs and an
+encoder, which made both engines silent on every board. The action screen (2.4) now reaches the pads
+and the switches; what is still missing there is anything momentary or velocity-like, since a menu row
+is a discrete event by construction.
 
 Three things the later ports established:
 
@@ -160,14 +212,25 @@ Nothing to do. See section 2.1 - the namespace rename the script already applied
 
 ### 4.3 Write the harness
 
-Nothing to do. `app/harness.cpp` hosts any engine; the control surface comes from the engine's own
-declarations. Two optional refinements are worth checking:
+Nothing to do. `app/harness.cpp` hosts any engine, the knob pages come from the engine's own
+`live_params()`, and the pads and switches it implements appear in the action screen on their own - the
+pad rows are derived from the engine's type (2.4) and the switch rows from `live_configs()`, so an
+engine that implements a sequencer gets sequencer rows and one that does not gets none.
 
+Three things to check anyway, in the order they cost time:
+
+- **Can everything the engine implements be reached?** Build it, open the action screen, and read the
+  list against the engine's header. A pad in the list that the engine does not implement is impossible
+  by construction; a pad the engine implements that is NOT in the list means the trait's signature no
+  longer matches the contract, and the `static_assert` in `engine_pads.h` should have said so.
 - **Does the engine narrow `live_params()`?** If not it inherits the all-live mask and the UI pages all
   24 slots. Adding the mask upstream (inside its `SPK_TERMINAL` block) is the right fix, and it makes
-  `describe` honest there too.
-- **Does it need a control this harness does not offer?** The panel map is in `app/README.md`. Anything
-  categorical beyond `ConfigId::Mode` currently has no gesture.
+  `describe` honest there too. The same applies to `live_configs()`, which is what the switch rows are
+  built from - an engine that narrows neither gets four pages of dead knobs and six dead switch rows.
+- **Does it need a control shaped differently?** The panel map is in `app/README.md`. A menu row is a
+  discrete event: it can fire a pad or step a switch, but it cannot be held, and it cannot be fast. An
+  engine whose gesture is momentary (a pad held for the duration of an effect) or timing-critical (a
+  launch) wants a gate input or MIDI, not a row.
 
 ### 4.4 Add the build glue
 
@@ -192,8 +255,12 @@ cd app && make ENGINE=<eng> BOARD=patch
 
 ### 4.5 SD content
 
-If the engine loads content from SD, add an `examples/<eng>/` tree and teach `scripts/provision_sd.sh`
-/ `make sd-card` about it, mirroring `examples/csound/` and `examples/chuck/`.
+If the engine loads content from SD there are two kinds of it. **Committed text slots** (the csound and
+chuck patch banks) live in `examples/<eng>/`; mirror those two directories and add the name to
+`provision_sd.sh`. **Generated audio** does not belong in git: add a builder to
+`scripts/make_sd_content.py` in the engine's own layout and format, and the engine's name to
+`provision_sd.sh`'s `AUDIO_ENGINES`. `make sd-content` then synthesizes it, `make sd-card` copies it,
+and `make sd-verify` checks a tree or a real card against the format rules. Which format is not a free choice; see 5.2.
 
 ## 5. SD audio streaming (done)
 
@@ -241,6 +308,20 @@ therefore live in AXI SRAM:
 
 `DIR` is fine: `f_readdir` buffers through the FATFS window rather than its own.
 
+Two corollaries worth carrying, because they decide whether new code is exposed:
+
+- **Small reads are safe wherever they live; bulk reads are not.** FatFs services a request shorter
+  than a sector through the `FIL`'s own buffer, so a 12-byte WAV-header read into a stack local works
+  even though the stack is in DTCMRAM. A full-sector read is handed to the DMA as the caller's pointer,
+  so the destination itself must be reachable - which is why the streaming rings and scratch are in
+  SDRAM and why nothing in the SD path reads bulk audio into a local.
+- **The heap is not automatically safe either.** `linker/sram_bss_in_axi.lds` places `.heap` in RAM_D2.
+  No engine in `app/` allocates, so this is inert today, but an engine that `malloc`s a buffer and
+  hands it to FatFs would reproduce the whole bug class. The `pod/` csound and chuck harnesses do
+  exactly that (a 64 KB patch-text buffer) and are safe only because their QSPI script puts the heap in
+  AXI SRAM. If you add an allocating engine to a BOOT_SRAM build, check where its buffer lands before
+  it reaches the card.
+
 What makes this expensive is that it does not look like one bug. The same root cause appeared four
 times during bring-up, each wearing a different mask:
 
@@ -278,6 +359,12 @@ generalize:
   moves `.bss` into the 480 KB AXI SRAM alongside `.text`, where they are allocated sequentially -
   no hand-tuned code/data boundary of the kind upstream's `alt_sram*.lds` need. Select it with
   `LDSCRIPT` in the engine's block.
+- **Reachability is a property of the pair, not the engine.** Several engines in this set were fully
+  correct and completely unusable at the same time, because the platform never called the method they
+  are built around (2.4). When an engine "does nothing", establish which of three things is true before
+  touching DSP: the gesture never arrived, the engine received it and chose to stay silent, or it is
+  producing sound you cannot hear. The header's two-character status field (`P4:2` - streaming, and the
+  play-press count) exists to separate exactly those, and `make diag` separates them at board level.
 - **`SPK_TERMINAL=1` has one link-time cost.** Engines that answer terminal queries (`radio`, `tape`)
   format replies through `TextSink`, whose out-of-line half is `src/terminal/text_sink.cpp`. It is in
   `CPP_SOURCES` for every build; nothing else from the terminal is needed.
@@ -315,9 +402,12 @@ onboard LED is visible even on a cased unit), and toggle it in the audio callbac
 alive" heartbeat. On the Patch the OLED is a better probe than either. If a QSPI app does not boot, the
 `SCB->VTOR` inject is the first thing to check.
 
-Validate on hardware: audio out, sweep the knobs, and (for MIDI engines) play NoteOn from a controller.
-The Pod is the only board this repo has validated on a device; the Patch and patch.init() drivers
-compile but have never been run.
+Validate on hardware: audio out, sweep the knobs, open the action screen and fire the rows the engine
+declares, and (for MIDI engines) play NoteOn from a controller. Board status as of this writing: the
+Pod has been validated on a device, the Daisy Patch has had a bring-up pass (which is where the DTCMRAM
+trap in 5.1 and the unreachable pad surface in 2.4 were both found, on hardware, by inference from
+symptoms), and patch.init() has never been run at all. The action screen itself is compile-verified
+across all 20 engines x 3 boards and has not yet been used on a device.
 
 ## 8. Port checklist
 
@@ -327,7 +417,11 @@ compile but have never been run.
 - [ ] Add the `else ifeq` block to `app/Makefile`, and the name to `ALL_ENGINES`.
 - [ ] `make ENGINE=<eng> BOARD=patch`, and check `--print-memory-usage` for the SRAM headroom;
       `OPT = -Os` or `APP_TYPE = BOOT_QSPI` if it does not fit.
-- [ ] Confirm the engine narrows `live_params()` upstream, so the OLED pages only real params.
+- [ ] Confirm the engine narrows `live_params()` and `live_configs()` upstream, so the OLED pages only
+      real params and the action screen lists only real switches.
+- [ ] Open the action screen and check its rows against the engine's header: every pad the engine
+      implements should be there (2.4), and every switch row should move something.
 - [ ] Add `examples/<eng>/` + `make sd-card` wiring if it loads SD content.
-- [ ] Flash and verify audio + knobs + MIDI on hardware.
+- [ ] Flash and verify audio + knobs + MIDI on hardware - including the engine's own pad, which for
+      several engines is the difference between silence and the whole feature.
 - [ ] Note the new engine in `app/README.md`, `README.md` and `CHANGELOG.md`.

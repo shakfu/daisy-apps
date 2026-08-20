@@ -25,6 +25,7 @@
 
 #include "board/controls.h"
 #include "app/param_names.h"
+#include "app/engine_pads.h"   // PadMask: which pads the built engine actually implements
 #include "engine/iengine.h"
 
 namespace daisyapps {
@@ -37,6 +38,25 @@ struct ParamSlot {
     float   written   = 0.f;     // last value written (deadband reference)
 };
 
+// One row of the action screen (see ParamUI below). At namespace scope rather than nested in the class
+// template, so naming it costs no `typename` - the row set depends on the engine, never on the board.
+struct ActionRow {
+    enum Kind : uint8_t {
+        Back,
+        Play, Alt, Rec,                     // the transport pads (Alt is Play with `reverse`)
+        Stop, ClearBuf,                     // buffer control
+        SeqArm, SeqTrig, SeqClear, Disarm,  // the step sequencer
+        Fx, FxLock,                         // the two end-of-chain effects (cfx says which)
+        Deck,
+        Config,
+        ClockIn,                            // platform row: what one pulse at the clock input means
+    };
+    Kind     kind = Back;
+    ConfigId cfg  = ConfigId::Count;   // Config rows only
+    uint8_t  span = 0;                 // how many values that switch takes
+    FxKind   fx   = FxKind::Flux;      // Fx / FxLock rows only
+};
+
 // Board-templated so the no-op screen calls on a Pod / patch.init() compile away, and so this needs no
 // virtual dispatch. `Board` is whatever board/board.h selected.
 template <typename Board>
@@ -46,13 +66,21 @@ public:
     static constexpr float kCatchWindow  = 0.02f;   // |knob - value| that counts as already caught
     static constexpr float kDeadband     = 0.004f;  // ignore pot jitter below this (porting guide 4.3)
     static constexpr int   kScreenHz     = 20;      // OLED refresh cap (the blit is not free)
+    // How long the action screen stays open with no interaction. Long enough to read the list and
+    // think about it; short enough that a menu left open does not quietly keep the encoder off the
+    // parameter pages.
+    static constexpr uint32_t kActionIdleMs = 6000;
 
     // Build the page list from the engine's declared live params. `knobs` is how many of the board's
     // analog controls to spend on params - the Patch's four; a board with dedicated CV jacks would
     // pass only its pot count.
-    void init(IEngine& engine, int knobs)
+    // `pads` is which of IEngine's optional pads this build's engine implements - see engine_pads.h,
+    // and app/harness.cpp for where it comes from. The action screen lists only those, so an engine
+    // is never offered a control it does not have.
+    void init(IEngine& engine, int knobs, PadMask pads = 0)
     {
         _knobs = knobs > kMaxSlots ? kMaxSlots : (knobs < 1 ? 1 : knobs);
+        _pads  = pads;
         _count = 0;
 
         const IEngine::ParamMask live = engine.live_params();
@@ -115,6 +143,126 @@ public:
     // the pickup cache: the knobs now address different values and must re-catch.
     void reseed(IEngine& engine) { seed_page(engine); }
 
+    // --- The action screen ---------------------------------------------------------------------
+    // Everything an engine exposes that is NOT a knob: the play / record pads and the categorical
+    // switches. A pad is momentary and a switch is a small enum, so neither fits the knob-per-param
+    // model - and a Daisy Patch has exactly one button, the encoder click, to spend on all of it.
+    // So the click opens a LIST instead of firing one hard-coded action: turning moves the cursor,
+    // clicking fires the highlighted row and stays there, and the rows are GENERATED from what the
+    // engine declares (capabilities(), live_configs()) exactly as the pages come from live_params().
+    //
+    // Why a list and not a timed gesture. The alternative was a hold ladder - 0.6 s play, 1.6 s
+    // record - which is invisible: nothing on screen says the second rung exists and the only way to
+    // find it is to be told. Every row here names itself, and none of it is timing-sensitive.
+    //
+    // Screen-only by construction. A board with no display (Pod, patch.init()) would be entering an
+    // invisible mode, so open_actions() refuses there and the harness keeps its direct click mapping.
+    bool in_actions() const { return _actions; }
+
+    // The clock-input row's selection, as an index. The harness polls this and pushes the matching
+    // pulses-per-quarter into the transport; the UI deliberately does not know what a transport is.
+    // kClockInNames' ORDER is the contract between the two - see the static_assert in harness.cpp.
+    static constexpr int  kClockInCount    = 4;
+    static constexpr const char* kClockInNames[kClockInCount] = { "1/4", "1/8", "1/16", "24p" };
+    int clock_in() const { return _clock_in; }
+
+    // Enter the action screen, rebuilding the rows for this engine. The cursor is KEPT from the last
+    // visit, so the action you use most stays two clicks away: one to open, one to fire.
+    void open_actions(IEngine& engine, uint32_t now_ms)
+    {
+        if (!Board::kHasScreen) return;
+        build_actions(engine);
+        if (_act_count == 0) return;
+        if (_act_cursor >= _act_count) _act_cursor = 0;
+        _actions = true;
+        _act_ms  = now_ms;
+    }
+
+    void close_actions() { _actions = false; }
+
+    void move_cursor(int inc, uint32_t now_ms)
+    {
+        if (!_actions || _act_count == 0) return;
+        _act_ms = now_ms;
+        int c = _act_cursor + inc;
+        while (c < 0)           c += _act_count;
+        while (c >= _act_count) c -= _act_count;
+        _act_cursor = c;
+    }
+
+    // Fire the highlighted row and stay in the list, so a repeated action is one click. Returns which
+    // KIND fired, so the harness can count play presses for its header without this class having to
+    // know what a play press means.
+    ActionRow::Kind fire(IEngine& engine, uint32_t now_ms)
+    {
+        _act_ms = now_ms;
+        if (!_actions || _act_count == 0) return ActionRow::Back;
+        const ActionRow r = _act[_act_cursor];
+        switch (r.kind) {
+            case ActionRow::Back:     _actions = false; break;
+            case ActionRow::Play:     engine.on_play_pad(_deck, false);   break;
+            case ActionRow::Alt:      engine.on_play_pad(_deck, true);    break;  // the pads' `reverse` half
+            case ActionRow::Rec:      engine.on_record_pad(_deck, false); break;
+            case ActionRow::Stop:     engine.stop_if_generating(_deck);   break;
+            case ActionRow::ClearBuf: engine.clear_buffer(_deck);         break;
+            case ActionRow::SeqArm:   engine.on_seq_toggle_arm(_deck);    break;
+            case ActionRow::SeqTrig:  engine.on_seq_trigger(_deck);       break;
+            case ActionRow::SeqClear: engine.clear_sequence(_deck);       break;
+            case ActionRow::Disarm:   engine.disarm_track(_deck);         break;
+            case ActionRow::FxLock:   engine.toggle_fx_lock(_deck, r.fx); break;
+            case ActionRow::Fx: {
+                // set_fx is a pad HELD, not a pad pressed - there is no "toggle" in the contract, so
+                // the on/off state is kept here and sent explicitly. Unknown until first used, for
+                // the same reason the switches are: the engine booted at its own state and nothing
+                // here can read it back, so the first click asserts ON.
+                const int f = (r.fx == FxKind::Flux) ? 0 : 1;
+                const int d = (_deck == DeckRef::A) ? 0 : 1;
+                const bool on = _fx_known[f][d] ? !_fx_on[f][d] : true;
+                _fx_on[f][d]    = on;
+                _fx_known[f][d] = true;
+                engine.set_fx(_deck, r.fx, on);
+                break;
+            }
+            case ActionRow::Deck:
+                set_deck(_deck == DeckRef::A ? DeckRef::B : DeckRef::A, engine);
+                break;
+            case ActionRow::ClockIn:
+                // No `-` state here, unlike the engine switches: the harness owns this value and knows
+                // what it booted at, so the row can be honest from the first draw.
+                _clock_in = (_clock_in + 1) % kClockInCount;
+                break;
+            case ActionRow::Config: {
+                const int     c    = static_cast<int>(r.cfg);
+                const int     d    = (_deck == DeckRef::A) ? 0 : 1;
+                const uint8_t span = r.span ? r.span : 1;
+                // A switch this UI has not written yet is UNKNOWN, not zero - the engine booted at
+                // whatever default it chose and the contract has no reader. So the first click
+                // SELECTS position 1 rather than advancing from a guess; every click after that
+                // cycles. From here on the screen and the engine agree by construction.
+                const uint8_t v = _cfg_known[c][d] ? static_cast<uint8_t>((_cfg[c][d] + 1) % span) : 0;
+                _cfg[c][d]       = v;
+                _cfg_known[c][d] = true;
+                if (r.cfg == ConfigId::Route) {                     // Route is global, not per-deck
+                    _cfg[c][d ^ 1]       = v;
+                    _cfg_known[c][d ^ 1] = true;
+                }
+                engine.set_config(r.cfg, _deck, static_cast<int>(v));
+                // A switch can repoint what the knobs mean (granular's deck_layout follows Mode), so
+                // drop them out of catch rather than let a stale pickup write the old value.
+                seed_page(engine);
+                break;
+            }
+        }
+        return r.kind;
+    }
+
+    // Main loop: close the screen after a spell with no interaction. Without this a menu left open
+    // keeps the encoder off the parameter pages until someone notices.
+    void tick(uint32_t now_ms)
+    {
+        if (_actions && now_ms - _act_ms >= kActionIdleMs) _actions = false;
+    }
+
     // Draw the page. Rate-limited internally; safe to call every main-loop pass. `engine_name` is the
     // build's engine (SPK_ENGINE_STR), `bpm` and `deck` come from the harness.
     // `status` is an optional short string drawn right-aligned in the header instead of the tempo.
@@ -127,6 +275,8 @@ public:
         if (!Board::kHasScreen) return;
         if (now_ms - _last_draw_ms < static_cast<uint32_t>(1000 / kScreenHz)) return;
         _last_draw_ms = now_ms;
+
+        if (_actions) { render_actions(board, engine_name, status); return; }
 
         char line[32];
         board.ScreenClear();
@@ -193,6 +343,174 @@ private:
             // the crossing test, and zeroing it here would fake a sweep from 0 on the next poll.
         }
     }
+
+    // --- Action screen internals ---------------------------------------------------------------
+    // The worst case, exactly: back, the ten pads as fourteen rows (play also yields alt; each of the
+    // two FX bits yields one row per effect), the deck row, and every switch. granular and graincloud
+    // are the only engines that reach it - 21 rows, four visible at a time.
+    static constexpr int kMaxActions = 16 + static_cast<int>(ConfigId::Count);   // + the clk-in row
+
+    // How many values a switch takes. The wire values are the contract's own
+    // (engine/engine_params.h): Route and Mode are ternary, the rest are 0/1 flags.
+    static uint8_t config_span(ConfigId id)
+    {
+        return (id == ConfigId::Route || id == ConfigId::Mode) ? 3 : 2;
+    }
+
+    // The rows, from what the engine says about itself. Pads come from the compile-time mask
+    // (engine_pads.h), configs from live_configs(), the deck row from capabilities() - three
+    // different questions, each answered by whichever channel can answer it honestly.
+    //
+    // The mask measures the engine's implementation rather than a declaration about it, so a row is
+    // present exactly when the method behind it is. That is what makes it safe to list the whole pad
+    // surface here: the sequencer and FX rows appear on the four engines that have them and nowhere
+    // else, instead of every engine carrying eight rows that do nothing.
+    void build_actions(IEngine& engine)
+    {
+        _act_count = 0;
+        auto add = [&](ActionRow::Kind k, ConfigId c = ConfigId::Count, FxKind f = FxKind::Flux) {
+            if (_act_count >= kMaxActions) return;
+            ActionRow& r = _act[_act_count++];
+            r.kind = k;
+            r.cfg  = c;
+            r.span = (k == ActionRow::Config) ? config_span(c) : 0;
+            r.fx   = f;
+        };
+
+        add(ActionRow::Back);
+
+        if (_pads & PadPlay) {
+            add(ActionRow::Play);
+            // The same pad with `reverse` set - upstream's Rev. It has no separate method, so it
+            // rides on the play bit: bard jumps back 15 s, shuttle and softcut swap track, edrums
+            // swaps drum, granular plays backwards.
+            add(ActionRow::Alt);
+        }
+        if (_pads & PadRecord)   add(ActionRow::Rec);
+        if (_pads & PadStop)     add(ActionRow::Stop);
+        if (_pads & PadClearBuf) add(ActionRow::ClearBuf);
+        if (_pads & PadSeqArm)   add(ActionRow::SeqArm);
+        if (_pads & PadSeqTrig)  add(ActionRow::SeqTrig);
+        if (_pads & PadSeqClear) add(ActionRow::SeqClear);
+        if (_pads & PadDisarm)   add(ActionRow::Disarm);
+        if (_pads & PadFx) {
+            add(ActionRow::Fx, ConfigId::Count, FxKind::Flux);
+            add(ActionRow::Fx, ConfigId::Count, FxKind::Grit);
+        }
+        if (_pads & PadFxLock) {
+            add(ActionRow::FxLock, ConfigId::Count, FxKind::Flux);
+            add(ActionRow::FxLock, ConfigId::Count, FxKind::Grit);
+        }
+
+        if (engine.capabilities() & CapDualDeck) add(ActionRow::Deck);
+
+        // One row per declared switch. An engine that narrows nothing keeps the inherited all-live
+        // mask and gets all six - the same "I did not say" the param pages inherit, and the same
+        // consequence: turning one does nothing rather than something wrong.
+        const IEngine::ConfigMask live = engine.live_configs();
+        for (uint8_t i = 0; i < static_cast<uint8_t>(ConfigId::Count); i++)
+            if (live & (IEngine::ConfigMask{1} << i)) add(ActionRow::Config, static_cast<ConfigId>(i));
+
+        // The one PLATFORM row: what a pulse at the clock input means. It is not the engine's to
+        // answer - the transport owns external sync - but it has to be settable on the box, because
+        // whether a Eurorack clock sends quarters or sixteenths is a property of the rack, not of the
+        // build. Only where there is a clock input to configure.
+        if (Board::kGateCount >= 2) add(ActionRow::ClockIn);
+    }
+
+    static const char* action_name(const ActionRow& r)
+    {
+        const bool flux = (r.fx == FxKind::Flux);
+        switch (r.kind) {
+            case ActionRow::Back:     return "back";
+            case ActionRow::Play:     return "play";
+            case ActionRow::Alt:      return "alt";
+            case ActionRow::Rec:      return "rec";
+            case ActionRow::Stop:     return "stop";
+            case ActionRow::ClearBuf: return "clear buf";
+            case ActionRow::SeqArm:   return "arm seq";
+            case ActionRow::SeqTrig:  return "trig";
+            case ActionRow::SeqClear: return "clr seq";
+            case ActionRow::Disarm:   return "disarm";
+            case ActionRow::Fx:       return flux ? "flux" : "grit";
+            case ActionRow::FxLock:   return flux ? "flux lock" : "grit lock";
+            case ActionRow::Deck:     return "deck";
+            case ActionRow::Config:   return kConfigNames[static_cast<uint8_t>(r.cfg)];
+            case ActionRow::ClockIn:  return "clk in";
+        }
+        return "";
+    }
+
+    // The list, four rows at a time, scrolled to keep the cursor visible with a row of context above
+    // it where there is one. A switch shows its position (1-based, as a player counts) so a mode is
+    // read off the screen instead of inferred from what changed in the sound.
+    void render_actions(Board& board, const char* engine_name, const char* status)
+    {
+        char line[32];
+        board.ScreenClear();
+
+        std::snprintf(line, sizeof(line), "%s %c act", engine_name, _deck == DeckRef::A ? 'A' : 'B');
+        board.ScreenText(0, 0, line, true);
+        if (status && *status) {
+            const int w = static_cast<int>(std::strlen(status)) * 6;
+            board.ScreenText(Board::kScreenWidth - w - 1, 0, status, true);
+        }
+
+        constexpr int kRows = 4;
+        int first = _act_cursor - 1;
+        if (first > _act_count - kRows) first = _act_count - kRows;
+        if (first < 0) first = 0;
+
+        for (int i = 0; i < kRows && first + i < _act_count; i++) {
+            const ActionRow& r = _act[first + i];
+            const int        y = 14 + i * 12;
+
+            char value[8] = {0};
+            if (r.kind == ActionRow::Deck) {
+                std::snprintf(value, sizeof(value), "%c", _deck == DeckRef::A ? 'A' : 'B');
+            } else if (r.kind == ActionRow::ClockIn) {
+                std::snprintf(value, sizeof(value), "%s", kClockInNames[_clock_in]);
+            } else if (r.kind == ActionRow::Fx) {
+                const int f = (r.fx == FxKind::Flux) ? 0 : 1;
+                const int d = (_deck == DeckRef::A) ? 0 : 1;
+                std::snprintf(value, sizeof(value), "%s",
+                              !_fx_known[f][d] ? "-" : (_fx_on[f][d] ? "on" : "off"));
+            } else if (r.kind == ActionRow::Config) {
+                const int c = static_cast<int>(r.cfg);
+                const int d = (_deck == DeckRef::A) ? 0 : 1;
+                // '-' means "not known", not "off": until this row is used, the engine's switch is
+                // wherever the engine put it and nothing here can read it back. Printing a position
+                // would be a guess, and a plausible number is worse than a visible blank.
+                if (_cfg_known[c][d]) std::snprintf(value, sizeof(value), "%d/%d", _cfg[c][d] + 1, r.span);
+                else                  std::snprintf(value, sizeof(value), "-/%d", r.span);
+            }
+
+            std::snprintf(line, sizeof(line), "%c%-10.10s %s",
+                          (first + i == _act_cursor) ? '>' : ' ', action_name(r), value);
+            board.ScreenText(0, y, line, true);
+        }
+
+        board.ScreenUpdate();
+    }
+
+    ActionRow    _act[kMaxActions];
+    int          _act_count  = 0;
+    int          _act_cursor = 1;       // `play`: what a first visit almost always wants
+    bool         _actions    = false;
+    uint32_t     _act_ms     = 0;
+    // The switch positions, as WRITTEN by this UI - the contract has no reader for a config, so the
+    // only honest source is what we last sent. Per deck, because every switch but Route is per-deck.
+    // _cfg_known says whether we have written it AT ALL: before that the engine sits at its own
+    // default (tape, shuttle, softcut and radio boot at Route = DoubleMono; bard at mode = Read), so
+    // the row reads `-` and the first click selects position 1. A `config(ConfigId)` reader on
+    // IEngine would remove the unknown entirely, at the cost of diverging from the upstream contract.
+    uint8_t      _cfg[static_cast<int>(ConfigId::Count)][2]       = {};
+    bool         _cfg_known[static_cast<int>(ConfigId::Count)][2] = {};
+    // The two end-of-chain effects, [flux|grit][deck], held for the same reason as the switches.
+    bool         _fx_on[2][2]    = {};
+    bool         _fx_known[2][2] = {};
+    PadMask      _pads           = 0;    // which pads this build's engine implements (engine_pads.h)
+    int          _clock_in       = 0;    // index into kClockInNames; 1/4 is the Eurorack default
 
     ParamId      _params[kMaxParams] = {};
     int          _count              = 0;

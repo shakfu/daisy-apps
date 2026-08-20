@@ -109,8 +109,7 @@ nothing" and "these three files are in the wrong WAV format" stop being the same
 |---|---|
 | CTRL 1-4 | the four parameters of the current page, with value pickup |
 | encoder turn | change page |
-| encoder click | dual-deck engine: switch deck A/B. Otherwise: cycle `ConfigId::Mode` |
-| **encoder long press** (~0.6 s, no turn) | **play / pause** (`IEngine::on_play_pad`) |
+| encoder click | open the **action screen**, then one click per row (see below) |
 | encoder hold + turn | `CapAux` engine: scroll its Aux selector. Otherwise: set the internal tempo |
 | GATE IN 1 | trigger the focused deck (`IEngine::on_gate_trigger`) |
 | GATE IN 2 | external clock - quarter-note pulses steer the transport tempo |
@@ -118,15 +117,60 @@ nothing" and "these three files are in the wrong WAV format" stop being the same
 | CV OUT 1/2 | `IEngine::process_cv`, block-rate, bipolar mapped onto the 0-5 V output |
 | GATE OUT | `IEngine::gate_out_triggered` on the focused deck |
 
-### Play, and the header status
+### The action screen
 
-The Patch has no buttons, so play/pause is a **long press** of the encoder — hold about a second
-without turning, and release. A short click still switches deck; hold-and-turn is still the Aux
-selector. Boards that do have buttons (Pod, patch.init()) map button 0 to play and button 1 to
-play-with-`reverse`, which engines read as their second gesture (bard jumps back 15 s).
+Everything an engine exposes that is not a knob — the play/record pads and the categorical switches —
+lives behind the encoder click. Click once to open the list, turn to move the cursor, click again to
+fire the highlighted row; the list stays open, so a repeated action is one click. `back` leaves, and
+so does six seconds of not touching anything. Only the encoder changes meaning — the four knobs go on
+driving the parameters of the page underneath, so nothing is frozen while the list is open. The cursor is remembered between visits, which puts the
+action you use most two clicks away.
 
-This matters more than it sounds: several engines start idle by design. bard boots paused, being a
-resume-where-you-left-off player, so without a play control it looks broken rather than stopped.
+| Row | Calls | Present when |
+|---|---|---|
+| `back` | — | always |
+| `play` | `on_play_pad(deck, false)` | the engine implements it |
+| `alt` | `on_play_pad(deck, true)` | with `play` — the pad's `reverse` half (bard jumps back 15 s; shuttle and softcut swap track; edrums swaps drum; granular plays backwards) |
+| `rec` | `on_record_pad(deck, false)` | the engine implements it |
+| `stop`, `clear buf` | `stop_if_generating`, `clear_buffer` | ditto |
+| `arm seq`, `trig`, `clr seq`, `disarm` | the `on_seq_*` / `clear_sequence` / `disarm_track` pads | ditto |
+| `flux`, `grit` | `set_fx(deck, kind, on)`, toggling | ditto |
+| `flux lock`, `grit lock` | `toggle_fx_lock(deck, kind)` | ditto |
+| `deck` | switches the focused deck A/B | `CapDualDeck` |
+| `mode`, `route`, … | `set_config(id, deck, n)`, cycling | one row per bit in `live_configs()` |
+
+"The engine implements it" is **measured, not declared** — see `app/engine_pads.h`. `IEngine`'s pads
+have no-op default bodies and `capabilities()` has no bit for most of them, so the harness asks the
+compiler instead: for an inherited member `&Derived::f` has type `R (Base::*)(...)`, and only a class
+that declares `f` makes it `R (Derived::*)(...)`. Comparing the two types folds to a constant at build
+time, costs nothing at runtime, assumes nothing about vtable layout, and has no declaration to keep in
+sync — which matters, because the nearest declarative proxy was wrong: `tape` and `shuttle` implemented
+`on_record_pad` while claiming no `CapRecording`.
+
+The result is that a list is exactly as long as the engine is deep. `reverb` and the Faust engines show
+`back` and their switches. `delay` adds play and alt. `granular` and `graincloud` show all fourteen pad
+rows — their sequencer and FX pads had no route to them on any board before this. What the trait cannot
+tell you is whether an implementation does anything useful; a declared no-op still gets a row, which is
+a spare line rather than a hidden feature.
+
+The switch rows show their position (`mode 2/3`) because the harness knows what it last wrote — the
+contract has no reader for a config. Before a row has been used it reads `-/3`, because the engine is
+sitting at whatever default it chose and nothing here can read that back; the first click selects
+position 1 and every click after it cycles, so screen and engine agree from first use onward. The **names** are the generic slot names from `param_names.h`,
+not the engine's word for the value: `reverb` reads `mode 3/3`, not `greyhole`. Adding
+`config_label(ConfigId, int)` to `IEngine` alongside the existing `param_label` would fix that for
+every engine at once.
+
+Why this matters more than it sounds: a lot of the engine set is inert without it. `granular` and
+`graincloud` have no audio at all until something records into a deck; `tape`, `shuttle` and `softcut`
+are recorders that could only play; `bard` boots paused by design, being a resume-where-you-left-off
+player; and every `CapDualDeck` engine — 15 of the 20 — had no way to reach `ConfigId::Mode`, which is
+`reverb`'s algorithm, `pstretch`'s source, `reso`'s and `mosc`'s voice mode.
+
+Boards with no screen cannot show a list, so on the Pod and patch.init() the click keeps its direct
+meaning (switch deck, else cycle `Mode`) and the pads live on the two buttons: **button 0 = play,
+button 1 = record**. `reverse` is unreachable there; record is the feature and reverse is a flavour,
+so record takes the button.
 
 The top-right of the header shows two characters of state instead of the tempo: `P` or `-` for whether
 the SD stream deck is actually playing a file, and a count of play-presses. That distinguishes "the
@@ -202,18 +246,22 @@ been strictly worse than taking the version that already works.
 
 All six streaming engines declare `CapAux`, so the encoder hold-and-turn gesture is live and
 meaningful on each: radio's station, tape's slot, softcut's loop, bard's bookmark. All six are also
-`CapDualDeck`, so the encoder click switches which deck the knobs address.
+`CapDualDeck`, so the action screen carries a `deck` row that switches which deck the knobs address.
 
 Card layout is per engine (radio scans a bank directory, bard reads and writes a resume file, and so
-on) - see each engine's source. Nothing is provisioned by `make sd-card` yet; that script currently
-knows only the csound and chuck patch banks.
+on) - see each engine's source. `make sd-content` generates test audio for all six in each one's own
+layout and format, `make sd-card SD=<path>` copies it to a card alongside the csound and chuck patch
+banks, and `make sd-verify` checks a tree or a real card against the format rules.
 
 ### Linker note
 
-`pstretch` and `bard` link with `linker/sram_bss_in_axi.lds` instead of libDaisy's stock SRAM script.
-The stock script places `.bss` in the 128 KB DTCMRAM, which pstretch overflows by ~172 KB (its FFT
-working set is ~291 KB of static data) and bard by ~10 KB. The variant moves `.bss` into the 480 KB AXI
-SRAM alongside `.text`, where the two are allocated sequentially and need no hand-tuned boundary.
+**Every** BOOT_SRAM build links with `linker/sram_bss_in_axi.lds` instead of libDaisy's stock SRAM
+script - it is the Makefile's default, not a per-engine exception. Two reasons. Capacity: the stock
+script places `.bss` in the 128 KB DTCMRAM, which `pstretch` overflows by ~172 KB (its FFT working set
+is ~291 KB of static data), `bard` by ~10 KB and `graincloud` likewise; the variant moves `.bss` into
+the 480 KB AXI SRAM alongside `.text`, where the two are allocated sequentially and need no hand-tuned
+boundary. And correctness: the SDMMC DMA cannot reach DTCMRAM at all, so a FatFs buffer landing there
+fails every transfer - see section 5.1 of the porting guide, which is where that cost a bring-up.
 `pstretch` then links at ~90% of that region - the tightest build in the set.
 
 ## Flashing

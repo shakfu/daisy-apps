@@ -62,8 +62,10 @@ public:
     void prepare() override;
     void process(const float* const* in, float** out, size_t size) override;
 
+    // CapRecording: on_record_pad records the focused track into its in-SDRAM tape buffer. Declared
+    // late (nothing in this repo reads the bit yet) so the claim matches the implementation.
     Capabilities capabilities() const override {
-        return CapOwnDisplay | CapDualDeck | CapAux | CapAltPos | CapPitchPickup;
+        return CapOwnDisplay | CapRecording | CapDualDeck | CapAux | CapAltPos | CapPitchPickup;
     }
 
     void  set_param(ParamId id, DeckRef::Ref d, float v) override;

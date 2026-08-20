@@ -190,11 +190,39 @@ under **Unreleased**.
   every BOOT_SRAM build (it was a per-engine exception for memory overflow), and the `FIL`/`FatFile`
   objects in `sd_stream_deck.h`, `StreamDeck::read_text` / `write_text` / `scan_bank` and the
   diagnostic are `static` rather than stack-allocated. Documented in the porting guide, section 5.1.
-- **The play/record surface was unreachable on every board.** `IEngine::on_play_pad` was never called
+- **The pad and switch surface was unreachable on every board**, which left a third of the engine set
+  inert in ways that all looked like "the engine is broken". `IEngine::on_play_pad` was never called
   and `controls.button[]` never read, so engines that start idle by design — bard boots paused, being
-  a resume-where-you-left-off player — looked broken rather than stopped. The Daisy Patch has no
-  buttons at all, so it now gets a long-press-the-encoder gesture for play/pause; boards with buttons
-  map button 0 to play and button 1 to play-with-reverse.
+  a resume-where-you-left-off player — looked broken rather than stopped. `on_record_pad` was called
+  by nothing at all: `tape`, `shuttle` and `softcut` are recorders that could only play back, and
+  `granular` / `graincloud` have no other way to get audio into a deck, so they emitted silence from
+  boot on every board. And `ConfigId::Mode` could not be reached on any `CapDualDeck` engine — 15 of
+  the 20 — because the encoder click had to be the deck switch: `reverb` was permanently its plate
+  algorithm rather than one of three, `pstretch` permanently its Live source (its whole SD clip bank
+  dead), `reso` and `mosc` locked to one voice mode.
+  The Patch now puts all of it behind one gesture: the encoder click opens an **action screen**
+  (`app/param_ui.h`) listing `play` / `rec` / `alt`, the deck switch, and one row per bit of the
+  engine's `live_configs()`, generated the same way the parameter pages are generated from
+  `live_params()`, plus the rest of the pad surface - `stop`, `clear buf`, the four sequencer pads and
+  the FX toggles - which nothing had ever called on any board. Clicking fires the highlighted row and
+  stays, so a repeat is one click; the list closes on `back` or six idle seconds. A switch the UI has
+  not written yet reads `-` rather than a guessed position, since the contract has no way to read one
+  back; the first click selects position 1 and the display is exact from there. This replaces the earlier long-press gesture, which was
+  invisible — nothing on screen said it existed. Boards with no display keep the direct click mapping
+  and get the pads on their buttons: **0 = play, 1 = record** (reverse loses the button; record is the
+  feature and reverse is a flavour).
+- **Which pads an engine implements is now measured rather than declared** (`app/engine_pads.h`).
+  `IEngine`'s optional pads have no-op default bodies and `capabilities()` has no bit for most of
+  them, so the action screen would otherwise have to offer every row on every engine. The trait uses a
+  language rule instead: for an inherited member `&Derived::f` has type `R (Base::*)(...)`, and only a
+  class that declares `f` makes it `R (Derived::*)(...)`. It folds to a constant at build time (the
+  engine is chosen at build time, so `ActiveEngine` is known), costs nothing at runtime, assumes
+  nothing about vtable layout, and has no declaration to drift - which is the point, since the nearest
+  declarative proxy was already wrong. A `static_assert` that the base's own mask is zero guards
+  against a signature in that header silently ceasing to match `IEngine`'s.
+- `tape` and `shuttle` now declare `CapRecording`. Both implement `on_record_pad` and always did;
+  nothing in this repo reads the bit yet, but a capability that contradicts the implementation is
+  exactly what a later reader trusts.
 - `alignas(32)` after `DSY_SDRAM_BSS` on the streaming rings was silently discarded by GCC ("appertains
   to a type-specifier"). The section attribute was applied correctly — the rings were always in SDRAM —
   but the alignment request was not. Moved ahead of the declaration.

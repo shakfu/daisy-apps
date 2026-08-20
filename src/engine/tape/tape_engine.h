@@ -44,7 +44,13 @@ public:
     void prepare() override;
     void process(const float* const* in, float** out, size_t size) override;
 
-    Capabilities capabilities() const override { return CapOwnDisplay | CapDualDeck | CapAux | CapAltPos; }
+    // CapRecording is declared because this engine really does record (on_record_pad -> a take
+    // streamed to the card). It was missing while nothing in this repo read the bit; the platform
+    // still does not, but a declaration that contradicts the implementation is the kind of thing a
+    // later reader trusts.
+    Capabilities capabilities() const override {
+        return CapOwnDisplay | CapRecording | CapDualDeck | CapAux | CapAltPos;
+    }
 
 #if SPK_TERMINAL
     // Engine-specific state (target B, docs/dev/terminal-target-b.md). These are things the generic
