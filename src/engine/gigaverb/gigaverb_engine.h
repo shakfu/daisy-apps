@@ -92,7 +92,16 @@ struct GigaverbEngineWrap {
         const float lo  = gigaverb_daisy::wrapper_param_min(st, i);
         const float hi  = gigaverb_daisy::wrapper_param_max(st, i);
         const float val = gigaverb_daisy::wrapper_get_param(st, i);
-        return (hi > lo) ? (val - lo) / (hi - lo) : 0.f;
+        if (hi <= lo) return 0.f;
+        const float n = (val - lo) / (hi - lo);
+        // CLAMP. IEngine::param is contractually a normalized 0..1 reading, and a gen~ export does not
+        // necessarily honour its own declared range: gigaverb's `revtime` DEFAULTS to 11 while its
+        // setter clamps to [0.1, 1] and it advertises outputmin/outputmax of 0.1/1. Normalizing that
+        // default gives 12.1, and a value above 1 is not merely cosmetic - the platform's soft-takeover
+        // can never catch it (neither `knob >= value` nor proximity can hold when the knob tops out at
+        // 1.0), so the knob is dead permanently rather than until it reaches an extreme. Found on
+        // hardware: `pos` pinned and unresponsive.
+        return n < 0.f ? 0.f : (n > 1.f ? 1.f : n);
     }
 };
 

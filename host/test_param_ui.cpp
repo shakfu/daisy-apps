@@ -1021,4 +1021,60 @@ TEST(an_uncaught_row_points_toward_the_value)
     CHECK(dn.drew("<pos"));
 }
 
+// --- an engine that reports outside 0..1 -----------------------------------------------------------
+//
+// Found on hardware, on `gigaverb`: `pos` read ~12 and its knob did nothing, ever. The gen~ export
+// defaults `revtime` to 11 while declaring its range as [0.1, 1], so the normalized read came out at
+// 12.1. A value above 1 is not a cosmetic error - the knob tops out at 1.0, so neither the crossing
+// test nor the proximity window can ever fire, and the control is dead permanently rather than until
+// it reaches an extreme. The platform now enforces the contract's range rather than trusting it.
+
+TEST(a_knob_is_still_catchable_when_the_engine_reports_above_one)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 12.1f);      // exactly what gigaverb reported
+
+    UI ui;
+    ui.init(e, 4);
+    e.clear_calls();
+
+    // Sweep to the top: with the value clamped to 1.0 this is the endpoint case, so the widened
+    // window catches it. Without the clamp nothing here can ever catch.
+    for (float k : {0.0f, 0.3f, 0.6f, 0.85f, 0.95f})
+        ui.poll_knobs(e, controls_of({k, 0, 0, 0}));
+    CHECK(e.writes.size() >= 1u);
+    CHECK_NEAR(e.param(ParamId::Pos, DeckRef::A), 0.95f, 1e-6);
+}
+
+TEST(a_knob_is_still_catchable_when_the_engine_reports_below_zero)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, -3.f);
+
+    UI ui;
+    ui.init(e, 4);
+    e.clear_calls();
+
+    for (float k : {1.0f, 0.7f, 0.4f, 0.15f, 0.05f})
+        ui.poll_knobs(e, controls_of({k, 0, 0, 0}));
+    CHECK(e.writes.size() >= 1u);
+}
+
+// ...and the row must not print a nonsense number either (12.1 would render as 1211).
+TEST(an_out_of_range_value_is_displayed_clamped)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 12.1f);
+
+    UI ui;
+    ui.init(e, 4);
+    FakeBoard board;
+    ui.render(board, e, "gigaverb", 120.f, 1000);
+    CHECK(board.drew("100"));
+    CHECK(!board.drew("1211"));
+}
+
 int main() { return daisyapps::test::run_all(); }

@@ -153,7 +153,7 @@ public:
             const float knob = c.analog[s];
 
             if (!slot.caught) {
-                const float value = engine.param(slot.id, _deck);
+                const float value = clamp01(engine.param(slot.id, _deck));
                 const bool  at    = std::fabs(knob - value) <= catch_window(value);
                 // The crossing test needs a PREVIOUS reading, and on the very first poll after init()
                 // there has not been one: `last_knob` is still its initial 0.0, which reads as "the
@@ -395,7 +395,7 @@ public:
             const char* label = engine.param_label(slot.id);
             if (!label) label = kParamNames[static_cast<uint8_t>(slot.id)];
 
-            const float value = engine.param(slot.id, _deck);
+            const float value = clamp01(engine.param(slot.id, _deck));
             const char  mark  = slot.caught ? ' ' : (value > slot.last_knob ? '>' : '<');
             std::snprintf(line, sizeof(line), "%c%-9.9s%3d", mark, label,
                           static_cast<int>(value * 100.f + 0.5f));
@@ -421,6 +421,14 @@ private:
     // Parameter pages plus the engine's own page, where there is one.
     int total_pages() const { return _pages + (_engine_page ? 1 : 0); }
 
+    // IEngine::param is contractually normalized 0..1, but an engine can get that wrong, and the
+    // consequence here is disproportionate: a value ABOVE 1 makes its knob permanently uncatchable
+    // (the knob tops out at 1.0, so neither the crossing test nor the proximity window can ever fire)
+    // and a value below 0 does the same at the bottom. A knob that can never take control is a much
+    // worse failure than a value read a few percent off, so the platform enforces the range rather
+    // than trusting it. Found on hardware: gigaverb's `pos` reported 12.1 and its knob was dead.
+    static float clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
+
 public:
     // How close a knob must be to a value to count as already sitting on it. Wider when the value is
     // jammed against an endpoint, where the crossing test cannot fire at all - see kEndCatchWindow.
@@ -439,7 +447,7 @@ private:
             const int idx = _page * _knobs + s;
             _slot[s].id        = (s < _knobs && idx < _count) ? _params[idx] : ParamId::Count;
             _slot[s].caught    = false;
-            _slot[s].written   = (_slot[s].id != ParamId::Count) ? engine.param(_slot[s].id, _deck) : 0.f;
+            _slot[s].written   = (_slot[s].id != ParamId::Count) ? clamp01(engine.param(_slot[s].id, _deck)) : 0.f;
             // last_knob is left as the previous poll's reading: it is the "where the knob was" half of
             // the crossing test, and zeroing it here would fake a sweep from 0 on the next poll.
         }

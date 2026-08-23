@@ -21,7 +21,40 @@ bootloader validated it and handed off.
 | `chorus` | yes | works | first Faust-generated engine |
 | `filter` | yes | works | |
 | `reverb` | yes | works | first engine to allocate from the SDRAM arena |
-| `delay` | yes | pending | first engine to read the transport |
+| `delay` | yes | works **after a fix** | see Bug 1 |
+| `gigaverb` | yes | pending, reflashed | gen~ runtime on the arena; see Bug 2 |
+
+### Bugs found on hardware
+
+Both were invisible to the host suite, and the reason is the same in each case: **every host test
+picked a comfortable mid-range value.** The logic was correct for the cases written down; the
+interesting cases were all at or beyond the boundaries. Both were found within a minute of flashing.
+
+**Bug 1 — `delay`: `tone` and `division` maxed and unresponsive.** `DelayEngine::init()` boots both at
+1.0 on purpose (so Clean boots transparent). Soft-takeover catches a knob by CROSSING its value, and
+crossing needs `knob >= value` — which an ADC essentially never satisfies for a value of exactly 1.0.
+The only remaining route was the 0.02 proximity window, so both knobs were dead across 98% of their
+travel. Two of the four knobs on that engine's first page.
+
+*Pre-existing, not introduced by the session's pickup work* - the crossing test required `knob >= value`
+before that change too. Fixed with `kEndCatchWindow` (0.10, applied only when the value sits against an
+endpoint) plus a direction marker on uncaught rows: `>` turn up, `<` turn down, replacing a bare `.`
+that said only "not live". The trade is explicit - catching at the edge of the wider window moves the
+param by up to 10% at once, which beats a knob that does nothing until the last 2% of its rotation.
+
+**Bug 2 — `gigaverb`: `pos` reported ~12 and its knob was dead permanently.** The gen~ export defaults
+`revtime` to 11 while its setter clamps to [0.1, 1] and it advertises that same range, so the
+normalized read came out at 12.1. A value above 1 is worse than a wrong number: the knob tops out at
+1.0, so neither the crossing test nor the proximity window can EVER fire. Fixed at both layers - the
+engine's `get_param` now honours the contract's 0..1, and `ParamUI` enforces the range rather than
+trusting it, because "a knob that can never be caught" is a disproportionate failure for a
+few-percent reporting error.
+
+**Still open, and a manifest question rather than a platform one:** `revtime` boots at 11 but clamps to
+1, so the reverb starts with an ~11 s tail that collapses to <=1 s the moment the knob is touched, with
+no way back. Either the declared range is wrong (gigaverb's revtime is conventionally in SECONDS) or
+the default is stale from a patch edit. Deliberately not changed here - it alters how the engine sounds
+at boot.
 
 **Not yet confirmed on hardware**, and deliberately not marked as passing: the four UI behaviours
 changed in this session (boot pickup priming, the header tempo, the OLED engine page, the
