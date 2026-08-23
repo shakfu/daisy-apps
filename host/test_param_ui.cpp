@@ -623,13 +623,14 @@ TEST(an_uncaught_knob_is_marked_on_screen)
 
     FakeBoard board;
     ui.render(board, e, "test", 120.f, 1000);
-    CHECK(board.drew(".pos"));
+    CHECK(board.drew(">pos"));                      // knob below the value: turn up
 
     hold(ui, e, controls_of({0.80f, 0, 0, 0}));     // caught
     board.lines.clear();
     ui.render(board, e, "test", 120.f, 2000);
     CHECK(board.drew(" pos"));
-    CHECK(!board.drew(".pos"));
+    CHECK(!board.drew(">pos"));
+    CHECK(!board.drew("<pos"));
 }
 
 // --- the engine page in the rotation ------------------------------------------------------------
@@ -919,6 +920,105 @@ TEST(route_and_its_selector_index_round_trip)
     CHECK(config_to_route(1) == Route::DoubleMono);
     CHECK(config_to_route(2) == Route::GenerativeStereo);
     CHECK(config_to_route(99) == Route::Stereo);    // out of range falls back, never wraps
+}
+
+// --- values pinned against an endpoint -------------------------------------------------------------
+//
+// Found on hardware, on `delay`: `division` and `tone` read 100 and did nothing. Both are booted at
+// 1.0 on purpose by DelayEngine::init(), and the crossing test cannot fire for a value of 1.0 -
+// crossing needs `knob >= value`, which an ADC never reads. Before kEndCatchWindow the only route was
+// the 0.02 proximity window, so those two knobs were dead across 98% of their travel.
+
+TEST(a_param_pinned_at_maximum_is_catchable_without_hunting)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Env});
+    e.set_value(ParamId::Env, DeckRef::A, 1.0f);        // exactly what DelayEngine::init() does
+
+    UI ui;
+    ui.init(e, 4);
+    e.clear_calls();
+
+    // The old behaviour: a full sweep of the range writes nothing at all.
+    for (float k : {0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 0.85f})
+        ui.poll_knobs(e, controls_of({k, 0, 0, 0}));
+    CHECK_EQ(e.writes.size(), 0u);
+
+    // The fix: the knob takes over on entering the widened endpoint window, well before the very end.
+    hold(ui, e, controls_of({0.92f, 0, 0, 0}));
+    CHECK(e.writes.size() >= 1u);
+    CHECK_NEAR(e.param(ParamId::Env, DeckRef::A), 0.92f, 1e-6);
+
+    // ...and it behaves normally over the whole range afterwards.
+    hold(ui, e, controls_of({0.30f, 0, 0, 0}));
+    CHECK_NEAR(e.param(ParamId::Env, DeckRef::A), 0.30f, 1e-6);
+}
+
+TEST(a_param_pinned_at_minimum_is_catchable_too)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 0.0f);
+
+    UI ui;
+    ui.init(e, 4);
+    e.clear_calls();
+
+    for (float k : {1.0f, 0.8f, 0.6f, 0.4f, 0.2f, 0.15f})
+        ui.poll_knobs(e, controls_of({k, 0, 0, 0}));
+    CHECK_EQ(e.writes.size(), 0u);
+
+    hold(ui, e, controls_of({0.08f, 0, 0, 0}));
+    CHECK(e.writes.size() >= 1u);
+}
+
+// The widened window is ONLY for endpoints. A mid-range value must keep the tight one, or takeover
+// would jump by up to 10% everywhere and the mechanism would stop doing its job.
+TEST(a_mid_range_param_keeps_the_tight_catch_window)
+{
+    CHECK_NEAR(UI::catch_window(0.5f),  UI::kCatchWindow,    1e-6);
+    CHECK_NEAR(UI::catch_window(0.25f), UI::kCatchWindow,    1e-6);
+    CHECK_NEAR(UI::catch_window(1.0f),  UI::kEndCatchWindow, 1e-6);
+    CHECK_NEAR(UI::catch_window(0.0f),  UI::kEndCatchWindow, 1e-6);
+
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 0.50f);
+
+    UI ui;
+    ui.init(e, 4);
+    e.clear_calls();
+    hold(ui, e, controls_of({0.60f, 0, 0, 0}), 2);      // 0.10 away - inside the WIDE window
+    CHECK_EQ(e.writes.size(), 0u);                      // ...but must not catch, because 0.5 is not pinned
+}
+
+// --- the uncaught marker says which way to turn ----------------------------------------------------
+
+TEST(an_uncaught_row_points_toward_the_value)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 0.80f);
+
+    UI ui;
+    ui.init(e, 4);
+
+    hold(ui, e, controls_of({0.20f, 0, 0, 0}));        // knob below the value -> turn up
+    FakeBoard up;
+    ui.render(up, e, "test", 120.f, 1000);
+    CHECK(up.drew(">pos"));
+
+    hold(ui, e, controls_of({0.95f, 0, 0, 0}));        // knob above the value... but 0.95 crosses 0.80
+    // ...so re-seed onto a fresh slot to test the downward marker without catching.
+    FakeEngine f;
+    f.param_mask = mask_of({ParamId::Pos});
+    f.set_value(ParamId::Pos, DeckRef::A, 0.20f);
+    UI dn_ui;
+    dn_ui.init(f, 4);
+    dn_ui.poll_knobs(f, controls_of({0.90f, 0, 0, 0}));
+    FakeBoard dn;
+    dn_ui.render(dn, f, "test", 120.f, 1000);
+    CHECK(dn.drew("<pos"));
 }
 
 int main() { return daisyapps::test::run_all(); }

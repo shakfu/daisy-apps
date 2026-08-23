@@ -7,6 +7,8 @@ Documents that live in this repo:
 - [`chuck-midi-in.md`](chuck-midi-in.md) — how MIDI reaches a `.ck` patch's `MidiIn`.
 - [`chuck-midi-in-porting.md`](chuck-midi-in-porting.md) — what had to change in the ChucK core to get
   it there, and the patch that does it (`scripts/patches/midi_daisy.patch`).
+- [`hardware-bringup.md`](hardware-bringup.md) — the ordered bench plan for validating `app/` on a
+  Daisy Patch, and the running record of what has actually been observed on a device.
 
 ## References to documents that are not here
 

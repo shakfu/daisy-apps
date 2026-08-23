@@ -64,6 +64,22 @@ class ParamUI {
 public:
     static constexpr int   kMaxSlots     = Controls::kMaxAnalog;   // knobs available for params
     static constexpr float kCatchWindow  = 0.02f;   // |knob - value| that counts as already caught
+    // ...and the wider window used when the value is PINNED AGAINST AN ENDPOINT.
+    //
+    // A knob is normally caught by CROSSING its value. That test is unsatisfiable for a value sitting
+    // at 1.0: crossing needs `knob >= value`, and an ADC essentially never reads exactly 1.0. The only
+    // remaining route is the proximity window above - so a param pinned at the top is dead across 98%
+    // of its knob's travel, and reads as a broken control.
+    //
+    // Not hypothetical: `delay` boots BOTH `division` and `tone` at 1.0 on purpose (so Clean boots
+    // transparent), which is two of the four knobs on its first page.
+    //
+    // The trade this makes is explicit: catching at the edge of the wider window means the first write
+    // moves the param by up to kEndCatchWindow at once. A bounded jump of that size, only for a value
+    // already jammed against a limit, is a better deal than a knob that does nothing until the last
+    // 2% of its rotation. Everything not near an endpoint keeps the tight window and jumps by at most
+    // kCatchWindow, as before.
+    static constexpr float kEndCatchWindow = 0.10f;
     static constexpr float kDeadband     = 0.004f;  // ignore pot jitter below this (porting guide 4.3)
     static constexpr int   kScreenHz     = 20;      // OLED refresh cap (the blit is not free)
     // How long the action screen stays open with no interaction. Long enough to read the list and
@@ -138,7 +154,7 @@ public:
 
             if (!slot.caught) {
                 const float value = engine.param(slot.id, _deck);
-                const bool  at    = std::fabs(knob - value) <= kCatchWindow;
+                const bool  at    = std::fabs(knob - value) <= catch_window(value);
                 // The crossing test needs a PREVIOUS reading, and on the very first poll after init()
                 // there has not been one: `last_knob` is still its initial 0.0, which reads as "the
                 // knob was at the bottom". Every param whose value sits at or below the pot then looks
@@ -363,9 +379,14 @@ public:
             board.ScreenText(Board::kScreenWidth - 18, 0, line, true);
         }
 
-        // One row per knob: name, value, and a bar. An uncaught knob is marked with '.' before its
-        // name and gets a caret on the bar at the knob's physical position, so the gap you have to
-        // close to take control is visible rather than guessed.
+        // One row per knob: name, value, and a bar. An uncaught knob gets a caret on the bar at the
+        // knob's physical position, and a marker before its name saying WHICH WAY TO TURN to close
+        // the gap: '>' to turn up, '<' to turn down, ' ' once the knob has control.
+        //
+        // The direction is the point. The marker used to be a bare '.', which says only "this knob is
+        // not live" - and a full bar with a small caret does not read as "sweep to the far end". A
+        // param pinned at an endpoint (delay boots two of them at 1.0) then looks exactly like a
+        // broken control. An arrow costs the same one character and turns hunting into following.
         for (int s = 0; s < _knobs; s++) {
             const ParamSlot& slot = _slot[s];
             const int        y    = 14 + s * 12;
@@ -375,7 +396,8 @@ public:
             if (!label) label = kParamNames[static_cast<uint8_t>(slot.id)];
 
             const float value = engine.param(slot.id, _deck);
-            std::snprintf(line, sizeof(line), "%c%-9.9s%3d", slot.caught ? ' ' : '.', label,
+            const char  mark  = slot.caught ? ' ' : (value > slot.last_knob ? '>' : '<');
+            std::snprintf(line, sizeof(line), "%c%-9.9s%3d", mark, label,
                           static_cast<int>(value * 100.f + 0.5f));
             board.ScreenText(0, y, line, true);
 
@@ -398,6 +420,16 @@ private:
 
     // Parameter pages plus the engine's own page, where there is one.
     int total_pages() const { return _pages + (_engine_page ? 1 : 0); }
+
+public:
+    // How close a knob must be to a value to count as already sitting on it. Wider when the value is
+    // jammed against an endpoint, where the crossing test cannot fire at all - see kEndCatchWindow.
+    static constexpr float catch_window(float value)
+    {
+        return (value <= kCatchWindow || value >= 1.f - kCatchWindow) ? kEndCatchWindow : kCatchWindow;
+    }
+
+private:
 
     // Point the knobs at this page's params and drop them out of catch, seeding the crossing detector
     // with where each knob physically is right now.
