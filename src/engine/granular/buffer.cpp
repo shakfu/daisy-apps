@@ -1,7 +1,6 @@
 #include "buffer.h"
 #include <cstring>
 #include "dsp/hann.h"
-#include "expose.h"
 #include "daisysp.h"
 #include "../../common.h"
 #include "memory/sample16.h"

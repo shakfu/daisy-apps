@@ -10,6 +10,55 @@ under **Unreleased**.
 
 ### Added
 
+- **Host test suite and `make test`** (`host/`). Four suites — 86 cases — over the platform layer's
+  pure logic: the lock-free `SpscRing` and its `PlayStream`/`RecordStream` pumps, `WavStreamReader`'s
+  chunk walk and the writer round-trip, `HarnessTransport`'s 48-PPQN tick grid and external-sync state
+  machine, and `ParamUI`'s value pickup, page paging and generated action rows. Runs under
+  AddressSanitizer + UndefinedBehaviorSanitizer by default (`make test SANITIZE=` to disable). The
+  harness is a ~50-line header (`host/check.h`) with recording fakes for the Board and `IEngine`
+  surfaces — no vendored framework, matching the stdlib-only convention in `scripts/`.
+- **`src/math_util.h`** — the scalar helpers the engine contract needs (`unitclamp`, `lerp`, `map`,
+  ...), with no HAL dependency. `engine/color.h` now includes this instead of `common.h`, which is
+  what makes `#include "engine/iengine.h"` compile under a plain host `g++`: its include closure drops
+  from 339 headers to 80 under the ARM build, and to standard-library-only on a host. `common.h`
+  includes it too, so the definitions stay single-sourced and no existing caller changes. This is the
+  change that made the test suite above possible; the `NOTE` in `color.h` had flagged it as the
+  blocker.
+- **`app/system_time.h`** — `SystemTime` (the libDaisy-backed `ITimeSource`) split out of
+  `app/harness_clock.h`, which is now HAL-free and host-compilable. `HarnessTransport` already took
+  its clock by injection, so the tick grid can be driven from a fake clock and asserted on.
+- **`scripts/check_docs.sh`** and **`docs/dev/README.md`** — the sk-engines design notes cited from
+  ported sources were never ported with them. Rewriting those citations would break the
+  verbatim-port property, so the 16 known absences are catalogued instead, and the script enforces the
+  list in both directions: a *new* dead link fails, and so does a catalogued entry that has since been
+  written. Runs as part of `make test`.
+- **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Two jobs on
+  every push, pull request, manual dispatch, and weekly. `test` runs the host suite and the
+  documentation-reference check with no cross toolchain (~1 minute). `firmware` is a matrix over all
+  three boards, each sweeping **every** engine plus `diag` — a full board sweep is ~40 s on 16 cores,
+  cheap enough that there is no reason to test a subset. The matrix is the point: only one board's
+  driver compiles per build, so a change to `patch_init_board.h` is invisible to a `BOARD=patch`
+  build, which is how that file carried a stale libDaisy GPIO call through an API change unnoticed.
+  The ARM toolchain is pinned to the 10.x generation the project is developed against, because the
+  vendored trees (Faust kernels, the gen~ export, Rings/Plaits, softcut-lib) are not known to be clean
+  under a modern GCC and Ubuntu's package is 14.x. Firmware sizes and the resolved libDaisy/DaisySP
+  revisions are written to each run's summary — the first because several engines needed `-Os` to fit
+  SRAM_EXEC and a size regression is how a working image stops linking, the second because
+  `fetch_libs.sh` clones unpinned (see below).
+- **`make smoke-engines`** (in `app/`) — one engine per **distinct build shape** rather than a sample
+  of the interesting DSP: header-only, single `.cpp`, source wildcard, `.cc` sources, the `-Os`
+  overrides, the streaming opt-in, the gen~ and vendored include paths, and the one `BOOT_QSPI` app.
+  About a third of the work of a full sweep, for a local "did I break a build shape" check.
+  `make list-smoke-engines` prints the set.
+- **A "Tests and CI" section in the README**, and a note in `scripts/fetch_libs.sh` recording that it
+  clones libDaisy and DaisySP **unpinned** (`--depth 1` of the default branch). That makes the build
+  non-reproducible across time and lets CI go red with no commit on this side; the note carries the
+  known-good revisions and what pinning would cost. Left as a deliberate policy choice rather than
+  changed.
+- **[`REVIEW.md`](REVIEW.md)** — a full review of the platform layer: what holds up, the correctness
+  and architecture findings ranked by severity, the UI notes, and a prioritised plan. Section 12 logs
+  which findings were acted on (with the verification for each) and which are still open, so a fix can
+  be read against the reasoning that produced it.
 - **Generic engine host (`app/`)** — one harness that runs any ported sk-engines engine on any of the
   three boards, with the engine chosen at build time (`make ENGINE=delay BOARD=patch`). Replaces the
   one-harness-per-engine pattern: `harness.cpp` builds the `EngineContext`, drives `process()` from the
@@ -180,6 +229,58 @@ under **Unreleased**.
 
 ### Fixed
 
+- **`host/Makefile` could not build from a clean checkout.** The phony `build` target collided with
+  the `$(BUILD)` directory target of the same name, so make resolved the compile rule's order-only
+  prerequisite to the phony one ("Circular build <- build/test_wav dependency dropped"), skipped the
+  `mkdir`, and the link failed with "cannot open output file". Invisible locally once `build/` exists —
+  found by running the CI command sequence against a cleaned tree. The directory is now created by the
+  compile recipe itself (`$(@D)`) and the phony target renamed to `compile`.
+- **Value pickup was bypassed at boot** (`app/param_ui.h`). `ParamSlot::last_knob` initialises to
+  `0.f`, and the crossing test reads that as "the knob was at the bottom" — so on the first
+  `poll_knobs` after boot, every param whose value sat at or below its pot looked like it had just
+  been swept across. Roughly half of them were captured instantly and slammed to the knob positions:
+  exactly the jump soft-takeover exists to prevent, at the one moment the user has not touched
+  anything. The crossing half of the test is now suppressed until a real reading has been recorded;
+  the at-the-value half still applies on the first poll, since it needs no history.
+- **`StreamDeck::seek_play` reset the ring while the audio ISR could be reading it**
+  (`src/hw/stream_deck.{h,cpp}`). `play_consume` checked the deck's mode and then called into the
+  ring, non-atomically — so an ISR already past that check would read through `SpscRing::reset()` and
+  copy out a ring's worth of stale audio. A seqlock-style generation counter now brackets the
+  mutation, and the consumer discards its bytes and emits silence if it moved. Reachable via `bard`,
+  which seeks a playing file as a matter of course.
+- **The tempo was never displayed** (`app/harness.cpp`, `app/param_ui.h`). The harness formatted a
+  status string on every frame, so the header's BPM branch was unreachable — while `delay`, `qdelay`
+  and `edrums` are tempo-synced and the encoder hold+turn tempo gesture had no feedback at all. The
+  status (stream state + play-press count) is now transient: it appears while a stream deck is
+  playing and for 3 s after a play press, and yields to the tempo otherwise. The tempo is also forced
+  while the hold+turn gesture is active.
+- **The action screen's first-visit cursor could change a setting** (`app/param_ui.h`). It was the
+  literal row 1, with a comment asserting that row is `play` — true only for an engine that has a play
+  pad. For `reverb`, `chorus`, `filter`, `delay`, `qdelay` and `gigaverb`, row 1 is the first config
+  switch, so opening the list and clicking once changed the reverb algorithm. The cursor now lands on
+  a momentary row (`play` if there is one, else another pad) and otherwise on `back`.
+- **`ParamUI::kMaxActions` had zero slack and truncated silently.** It was the literal
+  `16 + ConfigId::Count`, and `build_actions()` drops a row that does not fit without a word — so
+  adding one `PadBit` would have made the `clk in` row vanish undiagnosed. Now derived from a new
+  `kPadBitCount` (itself `static_assert`ed against the highest enumerator), and a dropped row puts a
+  `!` in the action-screen header.
+- **`SpscRing` trusted its power-of-two precondition** (`src/memory/spsc_ring.h`). A non-power-of-two
+  capacity silently mismatched the mask and sent every read and write to the wrong offset; `init()`
+  now rounds down to enforce it, and `capacity()` reports the truth. The ring is also non-copyable
+  (two rings over one buffer with independent atomics would corrupt everything), and zero-length
+  transfers short-circuit instead of calling `memcpy` through a null buffer.
+- **Cross-context counters were plain objects** (`src/memory/audio_stream.h`). `PlayStream::_eof` and
+  `_underruns` and `RecordStream::_overruns` are written in the audio ISR and read from the main loop
+  or vice versa. Now relaxed atomics — free on this target, and no longer a data race the compiler may
+  fold or hoist.
+- **Three engines used `daisysp::SoftLimit` without including `<daisysp.h>`** (`tape`, `shuttle`,
+  `softcut`), relying on the transitive `indicators.h -> ... -> color.h -> common.h` chain to supply
+  it. Exposed by the contract decoupling above; each now includes what it uses.
+- **`build_release.py` stamped dirty trees as clean.** `is_dirty()` used `git diff --quiet`, which
+  reports only unstaged changes to tracked files — so a release built with staged edits, or with an
+  untracked source file that a Makefile wildcard picks up, was recorded as reproducible in
+  `MANIFEST.txt`. Now `git status --porcelain`. The module docstring, which still described a
+  two-engine release matrix, was rewritten to describe the real one.
 - **The SD card never worked on a BOOT_SRAM build, in four places at once.** The SDMMC DMA cannot
   access DTCMRAM, and libDaisy's stock BOOT_SRAM linker script puts both `.bss` and the stack there —
   so every FatFs buffer handed to the DMA was unreachable. Found on hardware during Daisy Patch
@@ -265,6 +366,22 @@ under **Unreleased**.
 
 ### Removed
 
+- **`src/config.h`'s `Config::fill()` / `is_loaded()`** — a card-config text parser with no callers
+  anywhere (so every engine has always run on the defaults), and not safe to keep as latent code: it
+  read past its 8-byte line buffer for any line longer than 8 characters, overflowed an `int8_t` index
+  on a long line, built its buffers as VLAs from a non-constant `int`, and `memcmp`'d an
+  uninitialised `prop` on a leading numeric line. The accessors and `Config::dynamic()` are unchanged,
+  so all four call sites are untouched.
+- **The in-memory `wav_header(const uint8_t*, size_t, WavHeader&, size_t&)` parser** (`src/memory/wav.h`)
+  — no callers, and it read up to 16 bytes past the buffer on a truncated `fmt ` chunk (it checked the
+  chunk's *declared* size against 16 but never that those bytes were inside the buffer).
+  `WavStreamReader` is the parser that is actually used, and is now covered by 14 cases including the
+  truncation and size-overflow paths.
+- **`src/expose.h`** — a global mutable debug singleton, `#include`d by eight files, whose `IP1`/`FP3`
+  macros were never invoked and expand to statements with a baked-in `;`. It was also one of the paths
+  pulling the HAL into the LED layer.
+- **`src/meter.h`** — a `daisy::CpuLoadMeter` singleton that nothing ever called, plus the empty
+  `#ifdef METER` shell in `softcut_engine.cpp` that had guarded only its include.
 - ~~The spotykach front-panel LED/ring/display layer: `led.ring.{h,cpp}`, `display_model.h`,
   `engine_leds.h`, `color.{h,cpp}`; the `render()` / `render_ring()` / LED-query virtuals from
   `IEngine`; the `render()` overrides and their output meters from both engines; and the now-unused

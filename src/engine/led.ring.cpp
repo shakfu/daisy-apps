@@ -1,5 +1,4 @@
 #include "led.ring.h"
-#include "expose.h"
 
 // Size-optimize: ring drawing primitives feed only the 62 Hz LED render, never the audio path.
 #pragma GCC optimize("Os")

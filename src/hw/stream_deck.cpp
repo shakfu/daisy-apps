@@ -4,6 +4,8 @@
 
 #include "stream_deck.h"
 
+#include <cstring>   // memset - the silence written when a consume straddles a control-side mutation
+
 // Size-optimize: main-loop SD glue, never the audio path.
 #pragma GCC optimize("Os")
 
@@ -126,14 +128,16 @@ bool StreamDeck::seek_play(DeckRef::Ref deck, uint32_t frame) {
     Deck& d = _d[deck];
     if (d.mode.load(std::memory_order_acquire) != Mode::play || d.finalizing) return false;
     if (!d.raw_src || !d.file.is_open()) return false;      // the float-WAV play path is not frame-seekable
+
+    // Open the mutation window BEFORE dropping mode: a consume already past its mode check is still
+    // in flight, and `gen` is what tells it to throw its bytes away (see Deck::gen in the header).
+    d.gen.fetch_add(1, std::memory_order_release);          // -> odd: mutation in flight
     d.mode.store(Mode::idle, std::memory_order_release);    // ISR stops consuming
-    if (!d.raw.seek_to_frame(frame)) {
-        d.mode.store(Mode::play, std::memory_order_release);  // seek failed: leave the deck as it was
-        return false;
-    }
-    d.play.start(&d.raw);                                   // flush + re-seed the ring, clear eof
-    d.mode.store(Mode::play, std::memory_order_release);
-    return true;
+    const bool ok = d.raw.seek_to_frame(frame);
+    if (ok) d.play.start(&d.raw);                           // flush + re-seed the ring, clear eof
+    d.mode.store(Mode::play, std::memory_order_release);    // (on failure: leave the deck as it was)
+    d.gen.fetch_add(1, std::memory_order_release);          // -> even: stable again
+    return ok;
 }
 
 uint32_t StreamDeck::frames_of(const char* path) const {
@@ -262,8 +266,18 @@ void StreamDeck::_pump(Deck& d) {
 
 uint32_t StreamDeck::play_consume(DeckRef::Ref deck, uint8_t* dst, uint32_t n) {
     Deck& d = _d[deck];
+    // Sample the generation, do the work, re-sample. An odd value on entry means a control-side
+    // mutation is in flight right now; a changed value on exit means one started and finished while
+    // we were copying. Either way the bytes we hold may straddle a ring reset, so drop them and emit
+    // silence rather than a burst of stale audio. See Deck::gen.
+    const uint32_t gen0 = d.gen.load(std::memory_order_acquire);
+    if (gen0 & 1u) { std::memset(dst, 0, n); return 0; }
     if (d.mode.load(std::memory_order_acquire) != Mode::play) return 0;
-    return d.play.consume(dst, n);   // zero-fills any shortfall (silence)
+
+    const uint32_t got = d.play.consume(dst, n);   // zero-fills any shortfall (silence)
+
+    if (d.gen.load(std::memory_order_acquire) != gen0) { std::memset(dst, 0, n); return 0; }
+    return got;
 }
 
 uint32_t StreamDeck::record_produce(DeckRef::Ref deck, const uint8_t* src, uint32_t n) {

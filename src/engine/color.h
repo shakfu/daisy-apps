@@ -24,13 +24,14 @@
 #pragma once
 #include <cstdint>   // uint*_t (transitive-include hygiene; host build)
 
-// NOTE: this include is why the engine contract is no longer header-independent of the HAL. iengine.h
-// reaches here transitively (iengine.h -> display_model.h -> led.ring.h -> color.h), and common.h
-// pulls <daisy.h> / <daisysp.h>, so anything including iengine.h now needs libDaisy on its include
-// path. It is not removable as it stands: Color's constructor uses common.h's unitclamp(). Upstream
-// has the same shape and compiles the contract on a host via stub headers; daisy-apps has no host
-// build, so this costs nothing here today. It would need addressing before one exists.
-#include "../common.h"
+// HAL-free by construction, and it has to stay that way. iengine.h reaches this header transitively
+// (iengine.h -> display_model.h -> led.ring.h -> color.h), so anything included here is included by
+// every engine and by the platform's UI. This used to be `common.h`, which pulls <daisy.h> and
+// <daisysp.h> for the sake of the ONE function Color needs (unitclamp) - and that single edge is what
+// made the engine contract un-compilable without a cross toolchain, and blocked the host test build.
+// math_util.h is that function and its siblings, with nothing else attached. Do not reach for
+// common.h from here.
+#include "../math_util.h"
 
 namespace infrasonic
 {

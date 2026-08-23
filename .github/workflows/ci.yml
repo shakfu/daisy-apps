@@ -1,0 +1,140 @@
+name: CI
+
+# What this guards, and why each piece is here.
+#
+#   test      The host suite (host/) plus the documentation-reference check. No cross toolchain, no
+#             hardware: ~1 minute. This is the job that should stay green minute-to-minute.
+#   firmware  Every engine, for every board. Only ONE board's driver compiles per build, so a change
+#             to (say) patch_init_board.h is invisible to a BOARD=patch build - which is how that file
+#             carried a stale libDaisy GPIO call through an API change unnoticed. The matrix is the
+#             fix: three parallel jobs, each sweeping all 20 engines plus `diag`.
+#
+# The firmware job builds the FULL engine set rather than a subset. A clean sweep of one board is ~40 s
+# on 16 cores and a few minutes on a runner, which is cheap enough that there is no reason to test less
+# than everything. (`make smoke-engines` in app/ builds one engine per distinct build shape, ~1/3 the
+# work - that is a local fast path, not what CI runs.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly. Nothing here changes on its own EXCEPT the Daisy libraries: scripts/fetch_libs.sh clones
+    # libDaisy and DaisySP at the tip of their default branches with no pinned revision, so an upstream
+    # change can break this build with no commit on our side. A scheduled run turns that from "the next
+    # unrelated push fails mysteriously" into a dated, attributable failure.
+    - cron: '17 6 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `make test` runs scripts/check_docs.sh and then the four host suites under ASan + UBSan.
+      # g++ and make are already on the runner image; the suite has no other dependency, which is the
+      # point of keeping the harness a single header.
+      - name: make test
+        run: make test
+
+      - name: Record versions
+        if: always()
+        run: |
+          {
+            echo '### Host toolchain'
+            echo '```'
+            g++ --version | head -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  firmware:
+    name: firmware (${{ matrix.board }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # a break on one board should not hide the state of the other two
+      matrix:
+        board: [pod, patch_init, patch]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the 10.x generation on purpose. The Daisy toolchain documentation targets
+      # gcc-arm-none-eabi 10-2020-q4-major, this repo is developed against exactly that, and the
+      # vendored trees it has to compile (Faust kernels, the gen~ export, Mutable Instruments' Rings
+      # and Plaits, softcut-lib) are not known to be clean under a modern GCC. Ubuntu's packaged
+      # gcc-arm-none-eabi is 14.x, which would very likely fail this build for reasons that have
+      # nothing to do with a change under review.
+      #
+      # Bump deliberately, not incidentally: a newer toolchain is a change to test on its own branch.
+      - name: Install arm-none-eabi-gcc
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '10.3-2021.10'
+
+      # libs/ is gitignored and reproduced on demand (scripts/fetch_libs.sh clones + builds libDaisy
+      # and DaisySP). Building both from scratch dominates this job, so it is cached.
+      #
+      # The key is the fetch script's own hash: the script is what decides which revisions get built,
+      # so any change to it - including adding a pinned revision, which this repo should do - correctly
+      # invalidates the cache. Bump `-v1` by hand to force a rebuild for any other reason.
+      - name: Cache libs/
+        id: libs-cache
+        uses: actions/cache@v4
+        with:
+          path: libs
+          key: libs-${{ runner.os }}-${{ hashFiles('scripts/fetch_libs.sh') }}-v1
+
+      - name: Build libDaisy + DaisySP
+        if: steps.libs-cache.outputs.cache-hit != 'true'
+        run: scripts/fetch_libs.sh
+
+      # Record what actually got built. Because the clone above is unpinned, this is the only place the
+      # upstream revisions are written down, and it is what makes a drift failure diagnosable.
+      - name: Record library revisions
+        run: |
+          {
+            echo "### Libraries (board ${{ matrix.board }})"
+            echo '```'
+            arm-none-eabi-gcc --version | head -1
+            for lib in libDaisy DaisySP; do
+              printf '%-10s %s\n' "$lib" "$(git -C "libs/$lib" rev-parse --short HEAD 2>/dev/null || echo '(no git metadata - restored from cache)')"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build every engine
+        run: make -C app all-engines BOARD=${{ matrix.board }} -j"$(nproc)"
+
+      # `diag` links no engine and none of the engine contract, so it is the only build that exercises
+      # the board driver on its own. Deliberately absent from ALL_ENGINES, hence the separate step.
+      - name: Build the hardware diagnostic
+        run: make -C app diag BOARD=${{ matrix.board }} -j"$(nproc)"
+
+      # Firmware size is a live constraint here, not trivia: several engines needed -Os to fit
+      # SRAM_EXEC at all (reverb's Greyhole voice, graincloud, both Mutable engines), and one is a
+      # QSPI-execute build because it does not fit anywhere else. A size regression is exactly the kind
+      # of change that turns a working BOOT_SRAM image into one that does not link - or worse, links
+      # and does not boot. Putting the numbers in the job summary makes that visible per run.
+      - name: Report firmware sizes
+        if: always()
+        run: |
+          {
+            echo "### Firmware sizes (board ${{ matrix.board }})"
+            echo '```'
+            printf '%-14s %10s %8s %12s\n' engine text data bss
+            for dir in app/build-*-${{ matrix.board }}; do
+              elf=$(ls "$dir"/*.elf 2>/dev/null | head -1) || continue
+              [ -n "$elf" ] || continue
+              engine=${dir#app/build-}
+              engine=${engine%-${{ matrix.board }}}
+              arm-none-eabi-size "$elf" | tail -1 \
+                | awk -v n="$engine" '{printf "%-14s %10s %8s %12s\n", n, $1, $2, $3}'
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

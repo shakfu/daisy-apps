@@ -2,7 +2,6 @@
 #include "config.h"
 #include <functional>
 
-#include "expose.h"
 
 using namespace daisyapps;
 

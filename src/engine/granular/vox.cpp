@@ -1,5 +1,4 @@
 #include "vox.h"
-#include "expose.h"
 
 using namespace daisyapps;
 

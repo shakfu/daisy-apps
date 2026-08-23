@@ -1,6 +1,5 @@
 #include "fx.drive.h"
 #include "../../common.h"
-#include "expose.h"
 
 using namespace daisyapps;
 using namespace infrasonic;

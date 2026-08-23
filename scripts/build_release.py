@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 """Build distributable Daisy firmware binaries for download-and-flash users.
 
-daisy-apps ships two audio-language harnesses (csound, chuck), each buildable for three
-boards (pod, patch_init, patch). A "firmware" is one (engine, board) pair. This script does
-a clean build of every pair in the release matrix, names the artifacts
+daisy-apps ships two firmware families, and `make dist` covers both. A "firmware" is one
+(engine, board) pair; every pair is buildable for all three boards (pod, patch_init, patch).
+
+  app/  the engine host - one harness, the engine picked by ENGINE=. Twenty engines plus the
+        `diag` hardware diagnostic (APP_ENGINES below). Builds entirely from source in-tree
+        with no external dependency, which is why these make up the bulk of the matrix.
+  pod/  the two audio-language harnesses, `csound` and `chuck`. Each links a cross-built
+        static library that must be fetched first, so each is SKIPPED WITH A NOTICE if its
+        library is absent - a fresh checkout can still cut a release.
+
+This script does a clean build of every pair in the matrix, names the artifacts
 daisy-<engine>-<board>-<version>.bin, and collects them under dist/<version>/ with SHA-256
-checksums and RELEASE_NOTES.md (the CHANGELOG section for the version followed by flashing
-instructions). It lets users without the ARM toolchain (and the cmake / fetch-script
-dependencies the engines need) download a ready-to-flash binary instead of building one.
+checksums, MANIFEST.txt and RELEASE_NOTES.md (the CHANGELOG section for the version followed
+by flashing instructions). It lets users without the ARM toolchain (and the cmake /
+fetch-script dependencies the audio-language engines need) download a ready-to-flash binary
+instead of building one.
+
+`qdelay` and `glitch` incorporate GPLv3 code, so their binaries are a combined work that must
+be distributed under GPLv3; MANIFEST.txt carries a per-artifact license column and the release
+notes call those two out by name (GPL_ENGINES below).
 
 Unlike the sk-engines release script this is ported from, the daisy-apps harnesses bake no
 version banner into the binary, so there is no in-binary provenance check: the version lives
 in the dist/<version>/ directory name, MANIFEST.txt, and SHA256SUMS only.
 
-Each harness Makefile lives in pod/ and assumes pod/ is the working directory (its paths are
-relative: ../src, ../libs, ../thirdparty), so every build runs via `make -C pod`. The two
-Makefiles share one pod/build/ directory and compile shared objects with different defines,
-so this script removes pod/build entirely between pairs for a clean, independent build each.
+Each Makefile assumes its own directory is the working directory (its paths are relative:
+../src, ../libs, ../thirdparty), so builds run via `make -C app` / `make -C pod`. app/ gives
+each (engine, board) pair its own build-<engine>-<board>/ directory, so those are already
+independent; the two pod/ Makefiles SHARE one pod/build/ with conflicting per-object defines,
+so it is removed between pairs.
 
 Usage:
     python scripts/build_release.py [VERSION] [--engines E ...] [--boards B ...] [--hex]
@@ -24,16 +38,17 @@ Usage:
     VERSION     Version used in artifact names and the output directory. Defaults to
                 `git describe --tags --always` (a bare tag on a clean tagged checkout, else
                 the short commit SHA). Pass it explicitly to override.
-    --engines   Engines to build (default: $RELEASE_ENGINES, else csound chuck).
+    --engines   Engines to build (default: $RELEASE_ENGINES, else every engine above).
     --boards    Boards to build (default: $RELEASE_BOARDS, else pod patch_init patch).
     --hex       Also emit .hex artifacts (for ST-Link / STM32CubeProgrammer). Off by default:
                 both documented flash paths (the Daisy Web Programmer and dfu-util) use .bin.
 
 Examples:
-    python scripts/build_release.py                       # describe version, full matrix
-    python scripts/build_release.py 0.1.0                 # explicit version, full matrix
-    python scripts/build_release.py 0.1.0 --engines csound --boards pod   # one pair
-    python scripts/build_release.py 0.1.0 --hex           # also emit .hex alongside each .bin
+    python scripts/build_release.py                        # describe version, full matrix
+    python scripts/build_release.py 0.1.0                  # explicit version, full matrix
+    python scripts/build_release.py 0.1.0 --engines reverb delay --boards patch
+    python scripts/build_release.py 0.1.0 --engines csound --boards pod    # one pair
+    python scripts/build_release.py 0.1.0 --hex            # also emit .hex alongside each .bin
 """
 
 from __future__ import annotations
@@ -152,8 +167,17 @@ def default_version() -> str:
 
 
 def is_dirty() -> bool:
-    """True if the working tree has uncommitted changes (so the build is not reproducible)."""
-    return subprocess.run(["git", "diff", "--quiet"], cwd=REPO_ROOT).returncode != 0
+    """True if the working tree differs from HEAD in any way that could affect the build.
+
+    `git diff --quiet` alone reports only UNSTAGED changes to tracked files, which is the wrong
+    question here: a release built from a tree with staged edits, or with an untracked source file
+    that a Makefile wildcard picks up (`$(wildcard ../src/dsp/*.cpp)`,
+    `$(wildcard ../src/engine/granular/*.cpp)`), would be stamped clean in MANIFEST.txt. `git status
+    --porcelain` covers staged, unstaged and untracked in one shot; it honours .gitignore, so build
+    directories and dist/ do not count.
+    """
+    out = git_output("status", "--porcelain")
+    return bool(out)
 
 
 def run_make(*args: str) -> None:

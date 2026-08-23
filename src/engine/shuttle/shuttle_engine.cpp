@@ -7,6 +7,11 @@
 #include <cstring>
 #include <new> // placement new
 
+// daisysp:: helpers used below. Included explicitly rather than inherited: this used to arrive
+// transitively via indicators.h -> ... -> color.h -> common.h, which is the chain that was dragging
+// the whole HAL into the engine contract (see src/math_util.h).
+#include <daisysp.h>
+
 namespace daisyapps {
 
 // Bipolar capstan-speed map. The knob splits at noon (v=0.5): a small deadzone about centre maps to an

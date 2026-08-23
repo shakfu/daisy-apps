@@ -123,8 +123,19 @@ public:
             if (!slot.caught) {
                 const float value = engine.param(slot.id, _deck);
                 const bool  at    = std::fabs(knob - value) <= kCatchWindow;
-                const bool  crossed =
-                    (slot.last_knob < value && knob >= value) || (slot.last_knob > value && knob <= value);
+                // The crossing test needs a PREVIOUS reading, and on the very first poll after init()
+                // there has not been one: `last_knob` is still its initial 0.0, which reads as "the
+                // knob was at the bottom". Every param whose value sits at or below the pot then looks
+                // like it was just swept across, so at BOOT roughly half of them are captured instantly
+                // and slammed to the knob positions - precisely the jump soft-takeover exists to
+                // prevent, at the one moment the user has not touched anything.
+                //
+                // So the crossing half is suppressed until a real reading has been recorded. The `at`
+                // half still applies on that first poll: "the knob is already where the value is" needs
+                // no history and is true or false on the spot.
+                const bool crossed =
+                    _primed && ((slot.last_knob < value && knob >= value) ||
+                                (slot.last_knob > value && knob <= value));
                 if (at || crossed) {
                     slot.caught  = true;
                     slot.written = value;
@@ -137,6 +148,10 @@ public:
             }
             slot.last_knob = knob;
         }
+        // From here on `last_knob` holds a reading that actually happened, so crossing detection is
+        // meaningful. seed_page() deliberately does NOT clear this on a page turn - there the previous
+        // reading is real, which is the whole point of the comment there.
+        _primed = true;
     }
 
     // An engine whose deck->value mapping changed under us (IEngine::take_param_reseed) invalidates
@@ -173,6 +188,17 @@ public:
         if (!Board::kHasScreen) return;
         build_actions(engine);
         if (_act_count == 0) return;
+        // Land on the first row that DOES something. `back` is always row 0, so the useful default is
+        // row 1 - but only if row 1 exists; and on a first visit that row is `play` only for an engine
+        // with a play pad. For an engine without one (reverb, chorus, filter, delay, ...) row 1 is a
+        // config switch, and defaulting the cursor onto a mode selector means the second click of a
+        // first visit CHANGES THE MODE. So the initial position is computed from the rows that were
+        // actually built, and only the FIRST time - after that the cursor is remembered, which is what
+        // keeps a repeated action two clicks away.
+        if (!_act_seen) {
+            _act_cursor = first_useful_row();
+            _act_seen   = true;
+        }
         if (_act_cursor >= _act_count) _act_cursor = 0;
         _actions = true;
         _act_ms  = now_ms;
@@ -345,10 +371,25 @@ private:
     }
 
     // --- Action screen internals ---------------------------------------------------------------
-    // The worst case, exactly: back, the ten pads as fourteen rows (play also yields alt; each of the
-    // two FX bits yields one row per effect), the deck row, and every switch. granular and graincloud
-    // are the only engines that reach it - 21 rows, four visible at a time.
-    static constexpr int kMaxActions = 16 + static_cast<int>(ConfigId::Count);   // + the clk-in row
+    // The worst case, exactly. DERIVED rather than written as a literal: the old `16 + ConfigId::Count`
+    // was correct but had zero slack, and build_actions() drops a row that does not fit SILENTLY - so
+    // adding one bit to PadBit would have made the `clk in` row (added last) vanish with no diagnostic.
+    //
+    // Rows, in build_actions() order: `back`, then one row per pad bit plus one extra for `alt` (which
+    // rides on the play bit) and one extra for each of the two FX bits (one row per effect), then
+    // `deck`, then one row per config, then the platform `clk in` row.
+    static constexpr int kPadRows =
+        kPadBitCount   // one row per implemented pad
+        + 1            // `alt`: on_play_pad's `reverse` half, which has no bit of its own
+        + 2;           // set_fx / toggle_fx_lock each yield a row per FxKind, so one extra apiece
+    static constexpr int kMaxActions =
+        1                                      // back
+        + kPadRows
+        + 1                                    // deck
+        + static_cast<int>(ConfigId::Count)    // one per categorical switch
+        + 1;                                   // clk in
+    static_assert(kMaxActions >= 1 + kPadRows + 1 + static_cast<int>(ConfigId::Count) + 1,
+                  "kMaxActions no longer covers every row build_actions() can emit");
 
     // How many values a switch takes. The wire values are the contract's own
     // (engine/engine_params.h): Route and Mode are ternary, the rest are 0/1 flags.
@@ -369,7 +410,9 @@ private:
     {
         _act_count = 0;
         auto add = [&](ActionRow::Kind k, ConfigId c = ConfigId::Count, FxKind f = FxKind::Flux) {
-            if (_act_count >= kMaxActions) return;
+            // kMaxActions is derived from the pad/config counts above, so this can only fire if one of
+            // those derivations has drifted - a bug here, never a fact about an engine.
+            if (_act_count >= kMaxActions) { _act_overflow = true; return; }
             ActionRow& r = _act[_act_count++];
             r.kind = k;
             r.cfg  = c;
@@ -449,7 +492,11 @@ private:
         char line[32];
         board.ScreenClear();
 
-        std::snprintf(line, sizeof(line), "%s %c act", engine_name, _deck == DeckRef::A ? 'A' : 'B');
+        // The trailing '!' only ever appears if build_actions() had to drop a row, which is a
+        // kMaxActions derivation bug rather than anything an engine can cause - but a silently short
+        // list is exactly the failure that would otherwise be blamed on the engine.
+        std::snprintf(line, sizeof(line), "%s %c act%s", engine_name,
+                      _deck == DeckRef::A ? 'A' : 'B', _act_overflow ? "!" : "");
         board.ScreenText(0, 0, line, true);
         if (status && *status) {
             const int w = static_cast<int>(std::strlen(status)) * 6;
@@ -493,9 +540,48 @@ private:
         board.ScreenUpdate();
     }
 
+    // The cursor a first visit should land on.
+    //
+    // The governing rule: a first visit is two clicks (one to open, one to fire), and those two clicks
+    // must never silently change a setting. So the cursor lands on a MOMENTARY row - `play` if there
+    // is one, else any other pad - and otherwise on `back`, where the second click just closes the
+    // list again. It never lands on a `Config` switch (whose click changes the engine's mode) or on
+    // `clk in` (whose click changes what the rack's clock means).
+    //
+    // The old rule was the literal row 1, with a comment asserting that row is `play`. It is `play`
+    // only for an engine that HAS a play pad; for `reverb`, `chorus`, `filter`, `delay`, `qdelay` and
+    // `gigaverb` row 1 is the first config switch, so opening the list and clicking once changed the
+    // reverb algorithm.
+    //
+    // Only consulted on the first visit; after that the cursor is remembered, which is what keeps a
+    // repeated action two clicks away.
+    static bool is_momentary(ActionRow::Kind k)
+    {
+        switch (k) {
+            case ActionRow::Back:
+            case ActionRow::Config:
+            case ActionRow::ClockIn:
+            case ActionRow::Deck:
+                return false;   // these change state that persists past the click
+            default:
+                return true;    // the pads: play/alt/rec/stop/clear/seq/fx
+        }
+    }
+
+    int first_useful_row() const
+    {
+        for (int i = 1; i < _act_count; i++)
+            if (_act[i].kind == ActionRow::Play) return i;
+        for (int i = 1; i < _act_count; i++)
+            if (is_momentary(_act[i].kind)) return i;
+        return 0;   // nothing momentary to offer: `back`, which is harmless to click
+    }
+
     ActionRow    _act[kMaxActions];
     int          _act_count  = 0;
-    int          _act_cursor = 1;       // `play`: what a first visit almost always wants
+    int          _act_cursor = 0;       // seeded on the first open (see first_useful_row)
+    bool         _act_seen   = false;   // has the action screen been opened at least once
+    bool         _act_overflow = false; // a row did not fit - a kMaxActions bug, surfaced in the header
     bool         _actions    = false;
     uint32_t     _act_ms     = 0;
     // The switch positions, as WRITTEN by this UI - the contract has no reader for a config, so the
@@ -519,6 +605,7 @@ private:
     int          _page               = 0;
     DeckRef::Ref _deck               = DeckRef::A;
     ParamSlot    _slot[kMaxSlots];
+    bool         _primed             = false;   // has poll_knobs seen a real reading yet
     uint32_t     _last_draw_ms       = 0;
 };
 

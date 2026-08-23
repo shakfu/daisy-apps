@@ -27,20 +27,15 @@
 #include <cstdint>
 #include <functional>
 
-#include "daisy.h"
+// NO HAL INCLUDE HERE, deliberately. Everything below is arithmetic over an injected ITimeSource;
+// the libDaisy-backed implementation of that interface lives in app/system_time.h. That split is
+// what makes this file host-compilable, and the tick grid is the part of the harness most worth
+// proving off-target (see host/test_transport.cpp).
 #include "engine/itimesource.h"
 #include "engine/itransport.h"
 #include "engine/mode.h"
 
 namespace daisyapps {
-
-// ITimeSource over daisy::System. now_ms/now_us are what engines use for UI-rate motion (breathe,
-// blink, tap timing); nothing in the audio path depends on them.
-class SystemTime : public ITimeSource {
-public:
-    uint32_t now_ms() const override { return daisy::System::GetNow(); }
-    uint32_t now_us() const override { return daisy::System::GetUs(); }
-};
 
 // A free-running musical clock: fixed internal BPM until an external clock arrives at a gate input,
 // then locked to that. Ticks are generated on the main loop from the wall clock, at the same 48 PPQN

@@ -2,6 +2,7 @@
 
 #include "memory/spsc_ring.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -45,7 +46,9 @@ public:
     }
 
     void start(IChunkSource* src) {
-        _src = src; _eof = false; _underruns = 0;
+        _src = src;
+        _eof.store(false, std::memory_order_relaxed);
+        _underruns.store(0, std::memory_order_relaxed);
         _ring->reset();
     }
 
@@ -58,7 +61,7 @@ public:
     // being at EOF); only a zero-byte read ends the round - then eof() distinguishes file-end from
     // momentarily-nothing-available. Bounded per call by the ring's free space (~the read-ahead window).
     void pump() {
-        if (!_src || _eof) return;
+        if (!_src || _eof.load(std::memory_order_relaxed)) return;
         int rewinds = 0;                            // guard: don't spin forever on an empty source
         for (;;) {
             const uint32_t space = _ring->writable();
@@ -68,7 +71,7 @@ public:
             if (got) { _ring->write(_scratch, got); rewinds = 0; continue; }
             if (_src->eof()) {
                 if (_loop && rewinds < 2) { _src->rewind(); rewinds++; continue; }  // loop to the top
-                _eof = true;                        // not looping (or empty source): file ended
+                _eof.store(true, std::memory_order_relaxed);  // not looping (or empty source): file ended
             }
             return;
         }
@@ -80,22 +83,27 @@ public:
         const uint32_t got = _ring->read(dst, n);
         if (got < n) {
             std::memset(dst + got, 0, n - got);
-            if (!finished()) _underruns++;
+            if (!finished()) _underruns.fetch_add(1, std::memory_order_relaxed);
         }
         return got;
     }
 
-    bool     finished()  const { return _eof && _ring->readable() == 0; }
-    uint32_t underruns() const { return _underruns; }
+    bool     finished()  const { return _eof.load(std::memory_order_relaxed) && _ring->readable() == 0; }
+    uint32_t underruns() const { return _underruns.load(std::memory_order_relaxed); }
 
 private:
     SpscRing*     _ring = nullptr;
     IChunkSource* _src  = nullptr;
     uint8_t*      _scratch = nullptr;
     uint32_t      _scratch_n = 0;
-    bool          _eof = false;
-    bool          _loop = false;
-    uint32_t      _underruns = 0;
+    // _eof is written by the main-loop pump and read by the ISR (via finished()); _underruns is the
+    // mirror image. Both are single words that would be benign in practice on this core, but plain
+    // objects touched from two contexts are a data race the compiler is entitled to fold or hoist -
+    // relaxed atomics cost nothing here and make them defined. _loop is main-loop-only (set_loop and
+    // pump), so it stays plain.
+    std::atomic<bool>     _eof{false};
+    bool                  _loop = false;
+    std::atomic<uint32_t> _underruns{0};
 };
 
 // ---- Recording: ISR -> ring -> SD ------------------------------------------------------------------
@@ -110,14 +118,15 @@ public:
     }
 
     void start(IChunkSink* sink) {
-        _sink = sink; _stopping = false; _done = false; _overruns = 0;
+        _sink = sink; _stopping = false; _done = false;
+        _overruns.store(0, std::memory_order_relaxed);
         _ring->reset();
     }
 
     // ISR: push `n` bytes into the ring; bytes that don't fit are dropped and counted (never blocks).
     uint32_t produce(const uint8_t* src, uint32_t n) {
         const uint32_t put = _ring->write(src, n);
-        if (put < n) _overruns += (n - put);
+        if (put < n) _overruns.fetch_add(n - put, std::memory_order_relaxed);
         return put;
     }
 
@@ -139,16 +148,18 @@ public:
 
     void     stop()             { _stopping = true; } // request end; pump() flushes remaining, finalizes
     bool     finished() const   { return _done; }     // all produced bytes written + finalized
-    uint32_t overruns() const   { return _overruns; } // bytes dropped on a full ring
+    uint32_t overruns() const   { return _overruns.load(std::memory_order_relaxed); } // bytes dropped on a full ring
 
 private:
     SpscRing*   _ring = nullptr;
     IChunkSink* _sink = nullptr;
     uint8_t*    _scratch = nullptr;
     uint32_t    _scratch_n = 0;
-    bool        _stopping = false;
-    bool        _done = false;
-    uint32_t    _overruns = 0;
+    bool                  _stopping = false;   // main-loop only (stop/pump)
+    bool                  _done = false;       // main-loop only (pump), read by finished()
+    // Incremented in the ISR (produce), read from the main loop - relaxed atomic for the same reason
+    // as PlayStream::_underruns above.
+    std::atomic<uint32_t> _overruns{0};
 };
 
 } // namespace daisyapps

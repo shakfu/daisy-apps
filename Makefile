@@ -25,6 +25,31 @@ dist:
 	RELEASE_ENGINES="$(RELEASE_ENGINES)" RELEASE_BOARDS="$(RELEASE_BOARDS)" \
 	  $(REL_PY) scripts/build_release.py $(VERSION) $(if $(WITH_HEX),--hex,)
 
+# Host (native) test suite for the platform layer: the lock-free ring and its stream pumps, the WAV
+# chunk walk, the transport's tick grid, and the paged parameter UI's pickup and action rows. None of
+# it needs hardware - it is arithmetic and state machines that happen to ship on a Cortex-M7 - and all
+# of it is the kind of code that is obviously right and subtly wrong.
+#
+# Runs under ASan + UBSan by default (host/Makefile), which is what turns "reads one chunk past a
+# truncated file" from a silent field bug into a failing test.
+#
+#   make test                 build + run every suite
+#   make test SANITIZE=       without the sanitizers
+.PHONY: test
+test: check-docs
+	$(MAKE) -C host
+
+# Cheap consistency check: no source comment or README may cite a docs/*.md that neither exists nor is
+# catalogued as a known sk-engines absence in docs/dev/README.md. Part of `make test` because it is
+# instant and because a dead link is a defect a reader pays for, not the author.
+.PHONY: check-docs
+check-docs:
+	@scripts/check_docs.sh
+
+.PHONY: test-clean
+test-clean:
+	$(MAKE) -C host clean
+
 # Provision a mounted FAT32 SD card for every engine that reads one.
 #
 #   make sd-card SD=/Volumes/DAISY                       # everything

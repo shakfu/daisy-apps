@@ -57,6 +57,22 @@ private:
     // only ever doing one); play/record streams bind to it and to the common scratch at init().
     struct Deck {
         std::atomic<Mode> mode{Mode::idle};
+        // Seqlock-style generation counter guarding main-loop mutations of the live stream state
+        // against a concurrent ISR consume. ODD = a mutation is in flight.
+        //
+        // `mode` alone is not enough. play_consume() reads mode, finds `play`, and then calls
+        // PlayStream::consume() -> SpscRing::read(); those two steps are not atomic, so an ISR that
+        // passed the check immediately before seek_play() stores `idle` proceeds into the ring while
+        // the main loop is inside SpscRing::reset(). reset() rewrites head and tail with relaxed
+        // stores, so the consumer can observe an arbitrary `head - tail` and copy out a ring's worth
+        // of stale bytes. It stays in bounds (the mask never changes) - the symptom is a burst of
+        // previously-played audio on every seek, not a fault - but it is a real data race, and
+        // `bard` seeks a playing file as a matter of course.
+        //
+        // The consumer samples this before and after the copy and discards the result if it moved
+        // (see play_consume). Cost: one block of silence on a seek, which is what a seek sounds like
+        // anyway.
+        std::atomic<uint32_t> gen{0};
         bool            finalizing = false;  // record stopped; main loop flushing the tail + finalizing
         SpscRing        ring;
         PlayStream      play;

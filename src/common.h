@@ -26,6 +26,8 @@
 #include <daisy.h>
 #include <daisysp.h>
 
+#include "math_util.h"   // the HAL-free scalar helpers (unitclamp, lerp, map, ...)
+
 #define LOG_TAGGED(TAG, FMT, ...) \
     Log::PrintLine("[%s] " FMT, TAG, ##__VA_ARGS__)
 
@@ -65,38 +67,11 @@ inline void FailAssertion(const char* msg = NULL, ...)
 }
 
 // Math stuff
-
-constexpr float is_in_unit_range(float in)
-{
-    return in >= 0.0f && in <= 1.0f;
-}
-
-constexpr float sgn(float in)
-{
-    return in > 0 ? 1.0f : -1.0f;
-}
-
-constexpr float unitclamp(float in)
-{
-    return std::clamp(in, 0.0f, 1.0f);
-}
-
-inline float lerp(float a, float b, float t)
-{
-    return (1 - t) * a + t * b;
-}
-
-inline float lerp3(float value1, float value2, float value3, float t)
-{
-    if(t < 0.5)
-    {
-        return infrasonic::lerp(value1, value2, t * 2.0f);
-    }
-    else
-    {
-        return infrasonic::lerp(value2, value3, 2.0f * t - 1.0f);
-    }
-}
+//
+// is_in_unit_range / sgn / unitclamp / lerp / lerp3 / map moved to math_util.h, which this header
+// includes - they are the subset the HAL-free engine contract needs (engine/color.h), and keeping
+// them here would have meant every include of iengine.h dragging in <daisy.h>/<daisysp.h>. They are
+// still in namespace infrasonic and still reachable through common.h, so no caller changes.
 
 inline float frac_table_lerp(const float* table, int size, float tick)
 {
@@ -104,16 +79,6 @@ inline float frac_table_lerp(const float* table, int size, float tick)
     int   index2 = DSY_CLAMP((index1 + 1), 0, size - 1);
     float mu     = tick - floorf(tick);
     return infrasonic::lerp(table[index1], table[index2], mu);
-}
-
-template <typename T>
-inline T map(const T& x,
-             const T& in_min,
-             const T& in_max,
-             const T& out_min,
-             const T& out_max)
-{
-    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
 inline float dbfs2lin(float dbfs)

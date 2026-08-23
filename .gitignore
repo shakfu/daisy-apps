@@ -86,3 +86,6 @@ examples/sd/
 # Python bytecode (scripts/ is stdlib-only tooling)
 __pycache__/
 *.pyc
+
+REVIEW.md
+

@@ -97,6 +97,37 @@ make -f Makefile.chuck      # ChucK harness  -> build/harness_chuck.bin
 
 Those two Makefiles do share one `build/` directory and compile shared objects with different defines, so run `rm -rf build` when switching between them. Flashing instructions are in [`pod/README.md`](pod/README.md).
 
+## Tests and CI
+
+```
+make test                 # host suite + the documentation-reference check
+make test SANITIZE=       # ...without ASan/UBSan
+```
+
+`host/` builds and runs the platform layer natively — no cross toolchain, no hardware, about a second.
+It covers the parts that are pure logic and happen to ship on a Cortex-M7: the lock-free `SpscRing`
+and its play/record stream pumps, `WavStreamReader`'s chunk walk and the writer round-trip,
+`HarnessTransport`'s tick grid and external-sync state machine, and `ParamUI`'s value pickup, page
+paging and generated action rows. AddressSanitizer and UndefinedBehaviorSanitizer are on by default,
+which is what turns "reads one chunk past a truncated file" from a field bug into a failing test.
+
+This works because the engine contract is HAL-free: `#include "engine/iengine.h"` compiles under a
+plain host `g++` with only the standard library (see the note in [`src/math_util.h`](src/math_util.h)).
+Test doubles for the two injected surfaces live in `host/fakes.h` — a `FakeBoard` that records its
+draw calls, and a `FakeEngine` that records what was written to it. The harness itself is one
+dependency-free header, `host/check.h`, matching the stdlib-only convention in `scripts/`.
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `make test`, then builds **every engine
+for every board** — three parallel jobs sweeping all 20 engines plus `diag`. That matrix is the point:
+only one board's driver compiles per build, so a change to `patch_init_board.h` is invisible to a
+`BOARD=patch` build, which is how that file once carried a stale libDaisy GPIO call through an API
+change unnoticed. Firmware sizes are written to each run's summary, because several engines needed
+`-Os` to fit SRAM_EXEC at all and a size regression is how a working image stops linking.
+
+For a faster local check, `make smoke-engines` (in `app/`) builds one engine per **distinct build
+shape** — header-only, `.cpp`, source wildcard, `.cc`, the `-Os` overrides, streaming, the gen~ and
+vendored include paths, and the one `BOOT_QSPI` app — rather than a sample of the interesting DSP.
+
 ## SD cards
 
 Each audio-language harness loads a numbered patch bank from a FAT32 SD card — `csound/0.csd` .. `7.csd` for the Csound harness, `chuck/0.ck` .. `7.ck` for the ChucK harness — at the card root, with the built-in orchestra/program as the fallback. The engine boot-loads the lowest slot ~1 s after power-on; **hold the encoder and turn knob 1** to scroll the bank, release to switch live. Insert the card before power-on (the harness mounts once at boot).

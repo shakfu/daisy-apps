@@ -3,7 +3,6 @@
 #include <functional>
 #include <cstring>
 #include "mode.h"
-#include "expose.h"
 #include "engine/arena.h"
 
 using namespace daisyapps;

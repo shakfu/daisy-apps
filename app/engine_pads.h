@@ -46,6 +46,13 @@ enum PadBit : uint16_t {
 };
 using PadMask = uint16_t;
 
+// How many pad bits exist. Consumers size their row tables from this rather than from a literal, so
+// adding a pad here cannot silently overflow a UI list (see ParamUI::kMaxActions). The assert keeps
+// the count and the highest bit in step.
+inline constexpr int kPadBitCount = 10;
+static_assert(PadDisarm == (1u << (kPadBitCount - 1)),
+              "kPadBitCount is out of step with the PadBit enumerators above");
+
 // declares_<name><E>() - true iff E (or something between E and IEngine) declares that member.
 #define SPK_DECLARES(name, ret, ...)                                                      \
     template <class E>                                                                    \

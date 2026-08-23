@@ -1,6 +1,5 @@
 #include "generator.h"
 #include "config.h"
-#include "expose.h"
 #if SPK_GRAIN_GF
 #include "gf_cloud.h"   // ENGINE=graincloud: the GrainflowLib core that replaces the Vox output.
                         // Lives in src/engine/graincloud/, which is on the include path for that

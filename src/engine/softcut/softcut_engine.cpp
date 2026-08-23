@@ -5,9 +5,10 @@
 #include <cmath>
 #include <cstring>
 
-#ifdef METER
-#include "meter.h"
-#endif
+// daisysp:: helpers used below. Included explicitly rather than inherited: this used to arrive
+// transitively via indicators.h -> ... -> color.h -> common.h, which is the chain that was dragging
+// the whole HAL into the engine contract (see src/math_util.h).
+#include <daisysp.h>
 
 namespace daisyapps {
 

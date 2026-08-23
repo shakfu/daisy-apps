@@ -370,7 +370,32 @@ ALL_ENGINES = passthrough delay qdelay glitch reverb chorus filter voice gigaver
               radio tape shuttle pstretch softcut bard reso mosc \
               granular graincloud edrums
 
-.PHONY: all-engines list-engines
+# The subset CI builds on every push: one engine per DISTINCT BUILD SHAPE in this file, rather than a
+# sample of the interesting DSP. Between them these exercise every branch of the machinery above -
+# header-only vs. .cpp vs. wildcard vs. .cc sources, the -Os overrides, the streaming opt-in, the gen~
+# and vendored-tree include paths, and the one BOOT_QSPI app - so a change to the Makefile or the
+# platform layer that breaks a build shape fails in minutes instead of in the nightly full sweep.
+#
+#   passthrough  header-only engine: no ENGINE_SOURCES at all (the baseline shape)
+#   reverb       OPT=-Os override + Faust kernels
+#   gigaverb     gen~ tree: GEN_INC include paths + the GENLIB_* / GEN_EXPORTED_* defines
+#   bard         SPK_USE_STREAM + the AXI-.bss linker script under real static-data pressure
+#   softcut      vendored source wildcard ($(SOFTCUT_TP)/src/*.cpp) + SOFTCUT_INC, plus streaming
+#   granular     multi-.cpp wildcard, and the widest IEngine surface of anything here
+#   reso         ENGINE_CC_SOURCES: the .cc rule added below the include, plus stmlib
+#   mosc         APP_TYPE=BOOT_QSPI - a different linker script and the SCB->VTOR prologue
+#
+# `diag` is built alongside by the CI job: it links no engine and none of the contract, so it is the
+# only build that proves the board driver stands up on its own.
+SMOKE_ENGINES = passthrough reverb gigaverb bard softcut granular reso mosc
+
+.PHONY: all-engines smoke-engines list-engines list-smoke-engines
+smoke-engines:
+	@for e in $(SMOKE_ENGINES); do \
+	  echo "=== $$e ($(BOARD))"; \
+	  $(MAKE) --no-print-directory ENGINE=$$e BOARD=$(BOARD) || exit 1; \
+	done
+
 all-engines:
 	@for e in $(ALL_ENGINES); do \
 	  echo "=== $$e ($(BOARD))"; \
@@ -379,6 +404,9 @@ all-engines:
 
 list-engines:
 	@echo $(ALL_ENGINES)
+
+list-smoke-engines:
+	@echo $(SMOKE_ENGINES)
 
 # The diagnostic is not an engine and is deliberately absent from ALL_ENGINES (so `make all-engines`
 # stays a sweep of real firmware), but it should still be one command away.

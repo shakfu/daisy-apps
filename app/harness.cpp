@@ -42,7 +42,8 @@
 
 #include "board/board.h"
 #include "engine/engine_select.h"   // ActiveEngine, from the ENGINE= define
-#include "app/harness_clock.h"
+#include "app/system_time.h"    // SystemTime: the libDaisy-backed ITimeSource
+#include "app/harness_clock.h"   // HarnessTransport: the HAL-free tick grid over it
 #include "app/param_ui.h"
 
 // SD service. Two implementations of IStreamDeck live in this repo and the engine picks which one it
@@ -135,10 +136,22 @@ static volatile float s_cv[2] = {0.f, 0.f};
 
 static daisyapps::DeckRef::Ref s_deck = daisyapps::DeckRef::A;
 
-// How many times the play gesture has fired. On screen next to the stream state, because "nothing
+// How many times the play gesture has fired. Shown next to the stream state, because "nothing
 // happens" has two very different causes: the gesture never reached the engine, or it did and the
 // engine chose to stay silent.
-static int s_play_presses = 0;
+//
+// It shares the header's right-hand slot with the TEMPO, and it does not get to keep it. That slot
+// held the play/stream state unconditionally, which meant the tempo was never drawn on any build -
+// while `delay`, `qdelay` and `edrums` are tempo-synced and the only way to set the tempo is the
+// encoder hold+turn gesture, i.e. the one control on the panel with no feedback at all. So the
+// status is now transient: it appears while a stream deck is actually playing, and for a few
+// seconds after a play press (long enough to answer "did the gesture arrive"), and the slot reverts
+// to the tempo the rest of the time.
+static int      s_play_presses = 0;
+static uint32_t s_play_ms      = 0;   // when the last play gesture fired (0 = never)
+
+// How long a play press keeps the header slot after it fires.
+static constexpr uint32_t kStatusHoldMs = 3000;
 
 // Daisy's non-interleaving buffers are already de-interleaved (InputBuffer = const float* const*,
 // OutputBuffer = float**), which is exactly IEngine::process's shape - forward straight through.
@@ -289,7 +302,7 @@ int main(void)
         for (int b = 0; b < controls.button_count && b < daisyapps::Controls::kMaxButtons; b++) {
             const bool down = controls.button[b];
             if (down && !prev_button[b]) {
-                if (b == 0)      engine.on_play_pad(s_deck, false);
+                if (b == 0)      { engine.on_play_pad(s_deck, false); s_play_presses++; s_play_ms = now_ms; }
                 else if (b == 1) engine.on_record_pad(s_deck, false);
             }
             prev_button[b] = down;
@@ -332,7 +345,7 @@ int main(void)
                             ui.open_actions(engine, now_ms);
                         } else {
                             const daisyapps::ActionRow::Kind fired = ui.fire(engine, now_ms);
-                            if (fired == daisyapps::ActionRow::Play) s_play_presses++;
+                            if (fired == daisyapps::ActionRow::Play) { s_play_presses++; s_play_ms = now_ms; }
                             s_deck = ui.deck();   // the `deck` row moves the focus the UI owns
                         }
                     } else {
@@ -401,10 +414,24 @@ int main(void)
 
         // Rate-limited inside render(): the OLED blit is ~1 KB over SPI and has no business running at
         // main-loop speed.
-        // Header status: stream state + play-press count, e.g. "P4:2" (playing, deck A, 2 presses).
-        char status[12];
-        std::snprintf(status, sizeof(status), "%c%d",
-                      s_stream.is_playing(s_deck) ? 'P' : '-', s_play_presses % 10);
-        ui.render(board, engine, SPK_ENGINE_STR, transport.tempo(), now_ms, status);
+        //
+        // Header right-hand slot: the TEMPO by default, the stream/play status when there is something
+        // to say. `status` reads "P2" (a file is streaming, 2 play presses) or "-2" (nothing streaming);
+        // it answers "did the gesture arrive, and is a file actually playing", which is worth the slot
+        // right after a press and while a stream is live, and worth nothing the rest of the time. The
+        // tempo is worth it the rest of the time: `delay`, `qdelay` and `edrums` are tempo-synced, and
+        // the hold+turn tempo gesture below is otherwise completely blind.
+        const bool tempo_gesture = held && (engine.capabilities() & daisyapps::CapAux) == 0;
+        const bool stream_live   = s_stream.is_playing(s_deck);
+        const bool press_recent  = s_play_ms != 0 && (now_ms - s_play_ms) < kStatusHoldMs;
+
+        char        status[12];
+        const char* status_p = nullptr;
+        if (!tempo_gesture && (stream_live || press_recent)) {
+            std::snprintf(status, sizeof(status), "%c%d",
+                          stream_live ? 'P' : '-', s_play_presses % 10);
+            status_p = status;
+        }
+        ui.render(board, engine, SPK_ENGINE_STR, transport.tempo(), now_ms, status_p);
     }
 }

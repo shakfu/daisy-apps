@@ -72,71 +72,15 @@ inline bool check_id(const uint8_t* data, size_t offset, const char* id)
   return std::memcmp(data + offset, id, 4) == 0;
 }
 
-inline bool wav_header(const uint8_t* bytes, size_t size, WavHeader& header, size_t& header_size)
-{
-    size_t cursor = 0;
-    
-    // Need at least 12 bytes for RIFF header
-    if (size < 12) return false;
-
-    if (!check_id(bytes, cursor, "RIFF")) return false;
-    
-    std::memcpy(header.FileTypeBlocID, bytes + cursor, 4);
-    cursor += 4;
-
-    uint32_t riffChunkSize = read_val<uint32_t>(bytes, cursor);
-    header.size = riffChunkSize; 
-    cursor += 4;
-
-    if (!check_id(bytes, cursor, "WAVE")) return false;
-    
-    std::memcpy(header.FileFormatID, bytes + cursor, 4);
-    cursor += 4;
-    
-    bool foundFmt = false;
-    bool foundData = false;
-
-    while (cursor < size) {
-        if (cursor + 8 > size) break;
-
-        char chunkID[4];
-        std::memcpy(chunkID, bytes + cursor, 4);
-        cursor += 4;
-
-        uint32_t chunkSize = read_val<uint32_t>(bytes, cursor);
-        cursor += 4;
-
-        if (std::memcmp(chunkID, "fmt ", 4) == 0) {
-            std::memcpy(header.FormatBlocID, chunkID, 4);
-            header.BlocSize = chunkSize;
-
-            if (chunkSize < 16) return false;
-
-            header.AudioFormat   = read_val<uint16_t>(bytes, cursor + 0);
-            header.NbrChannels   = read_val<uint16_t>(bytes, cursor + 2);
-            header.SampleRate    = read_val<uint32_t>(bytes, cursor + 4);
-            header.BytePerSec    = read_val<uint32_t>(bytes, cursor + 8);
-            header.BytePerBloc   = read_val<uint16_t>(bytes, cursor + 12);
-            header.BitsPerSample = read_val<uint16_t>(bytes, cursor + 14);
-
-            foundFmt = true;
-        } 
-        else if (std::memcmp(chunkID, "data", 4) == 0) {
-            std::memcpy(header.DataBlocID, chunkID, 4);
-            header.DataSize = chunkSize;
-            header_size = cursor;
-            foundData = true; 
-        }
-
-        if (foundFmt && foundData) return true;
-
-        cursor += chunkSize;
-        if (cursor % 2 != 0) cursor++;
-        if (cursor > size) return false;
-    }
-
-    return false;
-}
+// NOTE: an in-memory `wav_header(const uint8_t*, size_t, WavHeader&, size_t&)` chunk parser used to
+// live here. It was removed: it had no callers anywhere in the repo (the streaming reader in
+// memory/wav_stream.h is the one that actually parses files, and it is spec-correct and bounds-safe),
+// and it read up to 16 bytes past the end of the buffer for a truncated `fmt ` chunk - it checked the
+// chunk's DECLARED size against 16 but never checked that those 16 bytes were inside `size`. Its
+// `cursor += chunkSize` could also overflow before the `cursor > size` guard.
+//
+// Anything needing to parse a WAV should use WavStreamReader::begin(), or extend find_cue_points()
+// below, which does bounds-check every read.
 
 // Scan a WAV byte buffer for the `cue ` chunk and fill `out` with the cue markers' sample-frame
 // offsets, keeping only those inside `frame_limit` (markers past the audio end are dropped) and

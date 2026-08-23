@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include "event.h"
 #include "nocopy.h"
-#include "expose.h"
 
 namespace daisyapps {
 
