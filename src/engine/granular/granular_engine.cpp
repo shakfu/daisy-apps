@@ -30,6 +30,14 @@ void GranularEngine::init(const EngineContext& ctx)
         _param_cache[static_cast<size_t>(ParamId::ModSpeed)][ref]      = 0.3f;
         // Likewise SIZE: was a shared 1.0 literal, now engine-seeded - carry granular's own 1.0 default.
         _param_cache[static_cast<size_t>(ParamId::Size)][ref]          = 1.0f;
+        // MIX and FEEDBACK are not 0 in the engine - Deck constructs at _in_out_mix = 0.5 and
+        // _feedback = kDefaultFeedback (0.95) - but the cache used to leave both at 0, so param()
+        // misreported them. That is not merely a wrong number on screen: the platform's soft-takeover
+        // catches a knob AT the reported value, so the first touch WROTE 0 and killed the deck's
+        // output (mix) or collapsed its overdub tail (feedback). Seeded from the deck itself rather
+        // than from copied literals, so there is one source of truth.
+        _param_cache[static_cast<size_t>(ParamId::Mix)][ref]           = deck.in_out_mix();
+        _param_cache[static_cast<size_t>(ParamId::Feedback)][ref]      = deck.feedback();
     }
 }
 
@@ -128,6 +136,32 @@ bool GranularEngine::set_config(const ConfigId id, const DeckRef::Ref ref, const
         case ConfigId::Count: break;
     }
     return false;
+}
+
+// Report the switch positions the platform's action screen would otherwise have to guess at. Three of
+// the six are readable from Core; LfoShape / StartModOn / SizeModOn have no getter there, so they stay
+// "not reported" (-1) and the platform keeps its write-cache fallback for them.
+//
+// Mode is the one that matters, and it is why this exists. A deck constructs at Mode::None, and
+// _set_buf_armed() does NOTHING in that state - so `rec` arms a deck that can never start, and the
+// engine has no audio at all from boot. Reporting Mode::None as -1 is honest (it has no position),
+// and the platform uses exactly that to steer a first visit at the unset row - see
+// ParamUI::first_useful_row.
+int GranularEngine::config(const ConfigId id, const DeckRef::Ref ref) const
+{
+    const auto d = _safe_ref(ref);
+    switch (id) {
+        case ConfigId::Route:   return route_to_config(_core.route());
+        case ConfigId::ModType: return _core.mod(d).type() == Modulator::Type::Follow ? 1 : 0;
+        case ConfigId::Mode:
+            switch (_core.deck(d).mode()) {
+                case Mode::Slice: return 0;
+                case Mode::Reel:  return 1;
+                case Mode::Drift: return 2;
+                default:          return -1;   // Mode::None - uninitialised, not a position
+            }
+        default: return -1;
+    }
 }
 
 float GranularEngine::tempo_to_fit(const DeckRef::Ref ref, const float fraction)

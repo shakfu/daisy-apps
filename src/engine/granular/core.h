@@ -35,6 +35,10 @@ public:
   Panner& panner() { return _panner; }
   Deck& deck(const DeckRef::Ref ref) { return _decks[ref]; }
   Modulator& mod(const DeckRef::Ref ref) { return _mod[ref]; }
+  // const overloads, so a const engine method can READ this state - IEngine::config() is const, and
+  // reporting a switch position must not require a mutable Core.
+  const Deck& deck(const DeckRef::Ref ref) const { return _decks[ref]; }
+  const Modulator& mod(const DeckRef::Ref ref) const { return _mod[ref]; }
 
   // Transport query forwarded to the platform clock (the engine reads it, never commands it).
   bool is_key_sub_quarter() const { return _transport->is_key_sub_quarter(); }

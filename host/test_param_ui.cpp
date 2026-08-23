@@ -19,6 +19,19 @@ using namespace daisyapps::test;
 
 using UI = ParamUI<FakeBoard>;
 
+// e.configs.back().value, but failing cleanly on an empty vector instead of aborting the suite under
+// the sanitizers - see CHECK_BACK_EQ in check.h.
+#define CHECK_BACK_EQ_VALUE(vec, expected)                                           \
+    do {                                                                             \
+        if ((vec).empty()) {                                                         \
+            std::printf("  %s:%d: expected a write, but %s is EMPTY\n",               \
+                        __FILE__, __LINE__, #vec);                                   \
+            _spk_ok = false;                                                         \
+            return;                                                                  \
+        }                                                                            \
+        CHECK_EQ((vec).back().value, (expected));                                     \
+    } while (0)
+
 namespace {
 
 // Poll the knobs `n` times with the same reading - the main loop's steady state.
@@ -827,7 +840,7 @@ TEST(a_reporting_engine_wraps_at_the_top_of_the_range)
     ui.open_actions(e, 0);
     ui.move_cursor(1, 0);
     ui.fire(e, 0);
-    CHECK_EQ(e.configs.back().value, 0);
+    CHECK_BACK_EQ_VALUE(e.configs, 0);
 }
 
 // An engine that does not report keeps exactly the old behaviour: unknown until written, and the
@@ -893,13 +906,13 @@ TEST(a_silent_engine_cycles_from_its_own_write_cache)
     ui.move_cursor(1, 0);                       // onto the mode row
 
     ui.fire(e, 0);                              // first click SELECTS position 1
-    CHECK_EQ(e.configs.back().value, 0);
+    CHECK_BACK_EQ_VALUE(e.configs, 0);
     ui.fire(e, 0);                              // thereafter it advances...
-    CHECK_EQ(e.configs.back().value, 1);
+    CHECK_BACK_EQ_VALUE(e.configs, 1);
     ui.fire(e, 0);
-    CHECK_EQ(e.configs.back().value, 2);
+    CHECK_BACK_EQ_VALUE(e.configs, 2);
     ui.fire(e, 0);                              // ...and wraps
-    CHECK_EQ(e.configs.back().value, 0);
+    CHECK_BACK_EQ_VALUE(e.configs, 0);
 }
 
 // The wire mapping ConfigId::Route carries is NOT the Route enum's own numbering - the enum starts at
@@ -1075,6 +1088,152 @@ TEST(an_out_of_range_value_is_displayed_clamped)
     ui.render(board, e, "gigaverb", 120.f, 1000);
     CHECK(board.drew("100"));
     CHECK(!board.drew("1211"));
+}
+
+// --- lending a knob to another gesture -------------------------------------------------------------
+//
+// The Aux selector borrows knob 1 while the encoder is held (upstream's Alt+PITCH). For as long as it
+// does, that knob must not also drive the parameter it normally addresses - the two meanings would
+// fight and the param would follow the selector sweep.
+
+TEST(a_suspended_knob_writes_nothing)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 0.50f);
+
+    UI ui;
+    ui.init(e, 4);
+    hold(ui, e, controls_of({0.50f, 0, 0, 0}), 2);   // caught and live
+    hold(ui, e, controls_of({0.55f, 0, 0, 0}));
+    CHECK(e.writes.size() >= 1u);
+    e.clear_calls();
+
+    ui.set_knob_suspended(0, true);
+    // Sweep it the whole way, as the Aux gesture would: the param must not move.
+    for (float k : {0.0f, 0.2f, 0.5f, 0.8f, 1.0f})
+        ui.poll_knobs(e, controls_of({k, 0, 0, 0}));
+    CHECK_EQ(e.writes.size(), 0u);
+    CHECK_NEAR(e.param(ParamId::Pos, DeckRef::A), 0.55f, 1e-6);
+}
+
+// Handing it back must not resume where it left off: the gesture moved the knob a long way from the
+// value it addresses, so writing again immediately would be exactly the jump pickup exists to prevent.
+TEST(a_released_knob_must_re_catch_before_it_writes_again)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 0.50f);
+
+    UI ui;
+    ui.init(e, 4);
+    hold(ui, e, controls_of({0.50f, 0, 0, 0}), 2);   // caught
+    e.clear_calls();
+
+    ui.set_knob_suspended(0, true);
+    ui.poll_knobs(e, controls_of({1.0f, 0, 0, 0}));  // gesture sweeps it to the top
+    ui.set_knob_suspended(0, false);
+
+    hold(ui, e, controls_of({1.0f, 0, 0, 0}), 3);    // released, but far from the value
+    CHECK_EQ(e.writes.size(), 0u);
+    CHECK_NEAR(e.param(ParamId::Pos, DeckRef::A), 0.50f, 1e-6);
+
+    hold(ui, e, controls_of({0.40f, 0, 0, 0}));      // swept back across 0.50 -> re-caught
+    CHECK(e.writes.size() >= 1u);
+}
+
+// Only the lent knob is affected; the others keep working throughout.
+TEST(suspending_one_knob_leaves_the_others_live)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos, ParamId::FluxFb});
+    e.set_value(ParamId::Pos,    DeckRef::A, 0.50f);
+    e.set_value(ParamId::FluxFb, DeckRef::A, 0.50f);
+
+    UI ui;
+    ui.init(e, 4);
+    hold(ui, e, controls_of({0.50f, 0.50f, 0, 0}), 2);
+    e.clear_calls();
+
+    ui.set_knob_suspended(0, true);
+    hold(ui, e, controls_of({1.0f, 0.60f, 0, 0}));
+    CHECK_EQ(e.writes.size(), 1u);
+    CHECK_EQ(static_cast<int>(e.writes[0].id), static_cast<int>(ParamId::FluxFb));
+    CHECK_NEAR(e.param(ParamId::Pos, DeckRef::A), 0.50f, 1e-6);
+}
+
+TEST(suspending_an_out_of_range_knob_is_harmless)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    UI ui;
+    ui.init(e, 4);
+    ui.set_knob_suspended(-1, true);
+    ui.set_knob_suspended(99, true);
+    hold(ui, e, controls_of({0.5f, 0, 0, 0}), 2);
+    CHECK(true);                                     // ASan is the assertion
+}
+
+// --- an unset switch on a reporting engine ---------------------------------------------------------
+//
+// Found on hardware: `granular` would not record. A deck constructs at Mode::None, and arming does
+// nothing in that state, so `rec` armed a deck that could never start - and the engine has no audio
+// until it records, so it was inert from boot with no indication why. The mode row was reachable but
+// nothing pointed at it.
+
+TEST(a_first_visit_lands_on_a_switch_the_engine_says_is_unset)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Route, ConfigId::Mode});
+    e.reports_config = true;
+    e.set_config_value(ConfigId::Route, DeckRef::A, 0);    // reported
+    e.set_config_value(ConfigId::Mode,  DeckRef::A, -1);   // Mode::None: no position
+
+    UI ui;
+    ui.init(e, 4, PadPlay);        // a play pad exists, and is still NOT what a first visit wants here
+    ui.open_actions(e, 0);
+
+    const ActionRow::Kind fired = ui.fire(e, 0);
+    CHECK_EQ(static_cast<int>(fired), static_cast<int>(ActionRow::Config));
+    CHECK_EQ(e.configs.size(), 1u);
+    CHECK_EQ(static_cast<int>(e.configs[0].id), static_cast<int>(ConfigId::Mode));
+    CHECK_EQ(e.configs[0].value, 0);                       // selects position 1
+}
+
+// The safety property: an engine that reports NOTHING must keep the old behaviour. Every config reads
+// -1 there because we cannot see them, not because they are unset - clicking one blind would change a
+// mode for no reason. `bard` and `pstretch` are in exactly that position.
+TEST(a_silent_engines_switches_are_left_alone)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Route, ConfigId::Mode});
+    e.reports_config = false;                              // reports nothing at all
+
+    UI ui;
+    ui.init(e, 4, PadPlay);
+    ui.open_actions(e, 0);
+
+    CHECK_EQ(static_cast<int>(ui.fire(e, 0)), static_cast<int>(ActionRow::Play));
+    CHECK_EQ(e.configs.size(), 0u);
+}
+
+// ...and an engine whose switches are ALL set keeps landing on play, as before.
+TEST(a_fully_reported_engine_still_lands_on_play)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Route, ConfigId::Mode});
+    e.reports_config = true;
+    e.set_config_value(ConfigId::Route, DeckRef::A, 1);
+    e.set_config_value(ConfigId::Mode,  DeckRef::A, 2);
+
+    UI ui;
+    ui.init(e, 4, PadPlay);
+    ui.open_actions(e, 0);
+    CHECK_EQ(static_cast<int>(ui.fire(e, 0)), static_cast<int>(ActionRow::Play));
+    CHECK_EQ(e.configs.size(), 0u);
 }
 
 int main() { return daisyapps::test::run_all(); }

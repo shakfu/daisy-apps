@@ -19,8 +19,10 @@
 //                     bard boots paused; reverb ships as one of its three algorithms).
 //   buttons           where a board has them (Pod, patch.init()): 0 = play, 1 = record. Those boards
 //                     have no screen to put a list on, so their click keeps its direct meaning.
-//   encoder hold+turn CapAux engine: scroll its Aux selector (upstream's Alt+PITCH gesture).
-//                     Otherwise: set the internal tempo.
+//   encoder hold     CapAux engine: KNOB 1 scrolls its Aux selector (model / kit / slot) - upstream's
+//                     Alt+PITCH gesture, and the same shape pod/ uses for its patch bank. Turning the
+//                     encoder while held nudges the same selector one step at a time.
+//                     Otherwise (no CapAux): turning while held sets the internal tempo.
 //   GATE IN 1         trigger the focused deck (IEngine::on_gate_trigger)
 //   GATE IN 2         external clock: quarter-note pulses steer the transport tempo
 //   MIDI IN           forwarded whole (handle_midi_message) plus NoteOn (handle_midi_note)
@@ -330,11 +332,38 @@ int main(void)
 
         ui.tick(now_ms);   // an action screen left open eventually hands the encoder back to the pages
 
+        const bool aux_engine = (engine.capabilities() & daisyapps::CapAux) != 0;
+
         if (held) {
+            // --- The Aux selector: KNOB 1 while the encoder is held ---------------------------------
+            // This is upstream's Alt+PITCH gesture - a modifier plus a KNOB - and it is what the rest
+            // of this repo already does: pod/README.md documents "turn knob 1 while holding", and
+            // pod/harness_chuck.cpp scrolls its patch bank exactly this way. This harness used to bind
+            // the selector to the ENCODER's rotation instead, which worked but made it the odd one out
+            // and gave a continuous selector a detent-at-a-time feel.
+            //
+            // The knob is absolute: the selector snaps to wherever knob 1 is when you start, which is
+            // what the pod harness does and what a selector wants (a position, not an accumulation).
+            // Deadbanded, because a still pot still jitters and every write is a model/kit/slot change.
+            //
+            // Knob 1 is LENT for the duration - see ParamUI::set_knob_suspended - so it is not also
+            // writing the parameter it normally addresses, and it must re-catch after release.
+            if (aux_engine) {
+                ui.set_knob_suspended(0, true);
+                if (controls.analog_count > 0) {
+                    const float k = controls.analog[0];
+                    if (std::fabs(k - aux) > 0.004f) {
+                        aux = k;
+                        engine.set_param(ParamId::Aux, s_deck, aux);
+                    }
+                }
+            }
+
             if (inc != 0) {
                 enc_turned = true;
-                if (engine.capabilities() & daisyapps::CapAux) {
-                    // Upstream's Alt+PITCH gesture: scroll the engine's own selector (model, kit, slot).
+                if (aux_engine) {
+                    // The encoder still nudges the same selector, one step per detent. Kept because it
+                    // is precise where the knob is fast, and because it costs nothing to leave in.
                     aux += static_cast<float>(inc) * 0.05f;
                     if (aux < 0.f) aux = 0.f;
                     if (aux > 1.f) aux = 1.f;
@@ -343,8 +372,9 @@ int main(void)
                     transport.set_tempo(transport.internal_tempo() + static_cast<float>(inc));
                 }
             }
-            engine.set_aux_active(s_deck, (engine.capabilities() & daisyapps::CapAux) != 0);
+            engine.set_aux_active(s_deck, aux_engine);
         } else {
+            ui.set_knob_suspended(0, false);   // hand knob 1 back; it re-catches before it writes again
             if (enc_was_held) {
                 engine.set_aux_active(s_deck, false);
                 if (!enc_turned) {
@@ -441,9 +471,28 @@ int main(void)
         const bool stream_live   = s_stream.is_playing(s_deck);
         const bool press_recent  = s_play_ms != 0 && (now_ms - s_play_ms) < kStatusHoldMs;
 
+        // The engine's own transport state, for the engines that report it (IEngine::play_leds - the
+        // default is all-false, so an engine that says nothing falls straight through).
+        //
+        // This is the difference between a diagnosable engine and an opaque one. `granular` and
+        // `graincloud` have NO audio until something is recorded into them, they draw no panel, and
+        // the Patch has no LEDs - so "nothing is happening" could equally be: the pad never reached the
+        // engine, the deck armed but is still waiting for its start condition (an onset in Reel/Drift,
+        // a key boundary in Slice), or it is recording and the input is silent. Three very different
+        // problems, previously indistinguishable. Upstream shows this on a Play/Rec LED; here it goes
+        // in the header, which is the only surface this board has spare.
+        const daisyapps::PlayLeds pl = engine.play_leds(s_deck);
+        const char* engine_state = pl.recording    ? "REC"
+                                 : pl.armed        ? "ARM"
+                                 : pl.play_queued  ? "QUE"
+                                 : pl.playing      ? "PLY"
+                                                   : nullptr;
+
         char        status[12];
         const char* status_p = nullptr;
-        if (!tempo_gesture && (stream_live || press_recent)) {
+        if (!tempo_gesture && engine_state) {
+            status_p = engine_state;
+        } else if (!tempo_gesture && (stream_live || press_recent)) {
             std::snprintf(status, sizeof(status), "%c%d",
                           stream_live ? 'P' : '-', s_play_presses % 10);
             status_p = status;

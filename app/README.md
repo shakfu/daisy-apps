@@ -110,7 +110,8 @@ nothing" and "these three files are in the wrong WAV format" stop being the same
 | CTRL 1-4 | the four parameters of the current page, with value pickup |
 | encoder turn | change page |
 | encoder click | open the **action screen**, then one click per row (see below) |
-| encoder hold + turn | `CapAux` engine: scroll its Aux selector. Otherwise: set the internal tempo |
+| encoder hold + **knob 1** | `CapAux` engine: scroll its Aux selector (model / kit / slot) - upstream's Alt+PITCH gesture, and the same shape `pod/` uses for its patch bank. Knob 1 is lent for the duration and re-catches on release |
+| encoder hold + turn | `CapAux` engine: nudge the same selector one step per detent. Otherwise: set the internal tempo |
 | GATE IN 1 | trigger the focused deck (`IEngine::on_gate_trigger`) |
 | GATE IN 2 | external clock - quarter-note pulses steer the transport tempo |
 | MIDI IN | forwarded whole, plus decoded NoteOn and start/stop |

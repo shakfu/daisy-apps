@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The header shows the engine's transport state** — `REC` / `ARM` / `QUE` / `PLY`, read from
+  `IEngine::play_leds()` and taking priority over the tempo. Engines that report nothing fall through
+  silently (the default `PlayLeds` is all-false). Added during hardware bring-up because `granular`
+  was undiagnosable without it: silent by design, drawing no panel, on a board with no LEDs — so
+  "nothing happens" could equally be a pad that never reached the engine, a deck armed and waiting on
+  a start condition, or a recording of silence. Three different faults, previously indistinguishable.
+- **The Aux selector follows knob 1** while the encoder is held, rather than the encoder's rotation.
+  That is upstream's Alt+PITCH gesture and what the rest of the repo already documents
+  (`pod/README.md`: "turn knob 1 while holding"); `app/harness.cpp` was the outlier. Knob 1 is lent
+  for the duration (`ParamUI::set_knob_suspended`) so it does not also write the param it normally
+  addresses, and it re-catches on release — otherwise letting go would drag that param to wherever the
+  selector ended up. The encoder nudge is kept as a fine adjustment.
+- **[`docs/dev/hardware-bringup.md`](docs/dev/hardware-bringup.md)** — the ordered bench plan for
+  validating `app/` on a Daisy Patch, and the running record of what has actually been observed on a
+  device: 11 of 21 builds confirmed, `granular` parked with its findings written down, 9 untested.
+
 - **`IEngine::config(ConfigId, DeckRef::Ref)`** — the categorical read-back the contract never had,
   and the counterpart to `set_config`. Without it the platform's only honest source for a switch
   position is what it last *wrote*, so before the user touches a switch its position is unknown:
@@ -161,6 +177,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Release packaging: a root `Makefile` with `make dist` (and `make gh-release`) driving `scripts/build_release.py`, which clean-builds the full engine x board matrix in one shot and collects version-stamped `daisy-<engine>-<board>-<version>.bin` artifacts under `dist/<version>/` with `SHA256SUMS`, `MANIFEST.txt`, and `RELEASE_NOTES.md` (CHANGELOG section + flashing guide). `RELEASE_ENGINES` / `RELEASE_BOARDS` restrict the matrix to a subset (e.g. a single board or pair), `VERSION` sets the version, and `WITH_HEX=1` also emits `.hex` artifacts.
 
 ### Fixed
+
+- **`granular` / `graincloud` could not record at all.** A deck constructs at `Mode::None`, and
+  `_set_buf_armed()` has an empty `case Mode::None: break;` — so `rec` armed a deck that could never
+  start, and both engines have no audio until something is recorded. Inert from boot with nothing
+  indicating why. Fixed by implementing `IEngine::config()` for both (reading Route / ModType / Mode
+  back from Core, which needed `const` overloads of `Core::deck()` and `Core::mod()`), and by teaching
+  the action screen's first-visit cursor to land on a switch the engine reports as **unset**. That
+  refines the "never land on a config" rule rather than contradicting it: clicking a switch with no
+  position cannot lose anything, whereas clicking one that has a position would change it blind. An
+  engine that reports *nothing* is still left alone, since there `-1` means "cannot see" rather than
+  "unset".
+- **`granular` / `graincloud` misreported `Mix` and `Feedback` as 0.** `init()` seeds 8 of 19 live
+  params; the deck's real defaults are `_in_out_mix = 0.5` and `_feedback = kDefaultFeedback` (0.95).
+  This was not cosmetic: soft-takeover catches a knob **at the reported value**, so the first touch of
+  the mix knob wrote 0 and killed the deck's output. Seeded from the deck itself via two new const
+  getters rather than copied literals, so there is one source of truth. Found on hardware; the third
+  defect in a row caused by `param()` not reflecting engine state, which in a system with pickup makes
+  a read-back bug into a write bug.
 
 - **The host suites did not rebuild when a header changed** (`host/Makefile`). Suites were relinked
   only when their own `.cpp` changed, so editing `app/param_ui.h` or `app/display_adapter.h` and

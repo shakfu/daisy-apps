@@ -152,6 +152,15 @@ public:
 
             const float knob = c.analog[s];
 
+            const uint32_t bit = 1u << s;
+            if (_suspended & bit) continue;           // lent to another gesture: writes nothing
+            if (_resume_pending & bit) {              // just handed back: re-catch from where it is now
+                _resume_pending &= ~bit;
+                slot.caught    = false;
+                slot.last_knob = knob;
+                continue;
+            }
+
             if (!slot.caught) {
                 const float value = clamp01(engine.param(slot.id, _deck));
                 const bool  at    = std::fabs(knob - value) <= catch_window(value);
@@ -189,6 +198,27 @@ public:
     // An engine whose deck->value mapping changed under us (IEngine::take_param_reseed) invalidates
     // the pickup cache: the knobs now address different values and must re-catch.
     void reseed(IEngine& engine) { seed_page(engine); }
+
+    // Lend a knob to another gesture. The Aux selector borrows knob 1 while the encoder is held
+    // (upstream's Alt+PITCH), and for as long as it does, that knob must not also be writing the
+    // parameter it normally addresses - the two meanings would fight and the param would follow the
+    // selector sweep.
+    //
+    // Releasing it does NOT simply resume: the gesture will have moved the knob a long way from the
+    // value it addresses, so it drops out of catch and must be swept across again. That is the same
+    // rule a page turn follows, and for the same reason - it is exactly the jump soft-takeover exists
+    // to prevent.
+    void set_knob_suspended(int idx, bool on)
+    {
+        if (idx < 0 || idx >= kMaxSlots) return;
+        const uint32_t bit = 1u << idx;
+        if (on) {
+            _suspended |= bit;
+        } else if (_suspended & bit) {
+            _suspended      &= ~bit;
+            _resume_pending |= bit;   // re-seed from the knob's new position on the next poll
+        }
+    }
 
     // Has every knob on the current page taken control of its param? False while any of them still has
     // to be swept across its value first. The screen shows this per row (the '.' marker and the caret);
@@ -240,7 +270,7 @@ public:
         // actually built, and only the FIRST time - after that the cursor is remembered, which is what
         // keeps a repeated action two clicks away.
         if (!_act_seen) {
-            _act_cursor = first_useful_row();
+            _act_cursor = first_useful_row(engine);
             _act_seen   = true;
         }
         if (_act_cursor >= _act_count) _act_cursor = 0;
@@ -654,8 +684,29 @@ private:
         }
     }
 
-    int first_useful_row() const
+    int first_useful_row(IEngine& engine) const
     {
+        // FIRST: a switch the engine reports as having NO position. Clicking it can only help - there
+        // is nothing to lose, and something may be badly wrong until it is set. `granular` is the case
+        // this exists for: a deck constructs at Mode::None, arming does nothing in that state, so `rec`
+        // silently cannot record and the engine has no audio at all from boot. Landing the cursor there
+        // turns "the engine is broken" into "click this".
+        //
+        // The distinction that makes this safe is between an engine that reports nothing (every config
+        // reads -1, so we know nothing and must not touch any of them - clicking would change a mode
+        // blind) and one that reports SOME configs but not this one (so -1 really does mean unset).
+        // Only the second earns the cursor.
+        bool any_reported = false;
+        for (int i = 1; i < _act_count; i++)
+            if (_act[i].kind == ActionRow::Config && engine.config(_act[i].cfg, _deck) >= 0) {
+                any_reported = true;
+                break;
+            }
+        if (any_reported) {
+            for (int i = 1; i < _act_count; i++)
+                if (_act[i].kind == ActionRow::Config && engine.config(_act[i].cfg, _deck) < 0) return i;
+        }
+
         for (int i = 1; i < _act_count; i++)
             if (_act[i].kind == ActionRow::Play) return i;
         for (int i = 1; i < _act_count; i++)
@@ -693,6 +744,8 @@ private:
     DeckRef::Ref _deck               = DeckRef::A;
     ParamSlot    _slot[kMaxSlots];
     bool         _primed             = false;   // has poll_knobs seen a real reading yet
+    uint32_t     _suspended          = 0;       // knobs currently lent to another gesture
+    uint32_t     _resume_pending     = 0;       // ...and those just handed back, awaiting a re-seed
     uint32_t     _last_draw_ms       = 0;
 };
 

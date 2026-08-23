@@ -8,58 +8,150 @@ whole point of this exercise, and it is also why the ORDER below matters more th
 stage adds exactly one new unknown, so a failure names its own cause. Testing engines in a random
 order would leave every symptom ambiguous between the engine, the harness and the driver.
 
-## Results so far (Daisy Patch, 2026-08-23)
+## Status (Daisy Patch, session of 2026-08-23/24)
 
-First hardware run of anything under `app/`. Flashed over DFU from the dev machine
-(`dfu-util` to QSPI `0x90040000`); every image so far has left DFU cleanly, which means the
-bootloader validated it and handed off.
+First hardware run of anything under `app/`. Flashed over DFU from the dev machine (`dfu-util` to QSPI
+`0x90040000`). **11 of 21 builds confirmed, 1 parked, 9 untested.**
 
-| Build | Flashed | Reported | Notes |
-|---|---|---|---|
-| `diag` | yes | **all seven pages OK** | Encoder counts **one per detent** despite the unthrottled main loop, and the **SDRAM check passes**. Those were the two blockers. |
-| `passthrough` | yes | works | |
-| `chorus` | yes | works | first Faust-generated engine |
-| `filter` | yes | works | |
-| `reverb` | yes | works | first engine to allocate from the SDRAM arena |
-| `delay` | yes | works **after a fix** | see Bug 1 |
-| `gigaverb` | yes | pending, reflashed | gen~ runtime on the arena; see Bug 2 |
+### Confirmed working
 
-### Bugs found on hardware
+| Build | Notes |
+|---|---|
+| `diag` | **all seven pages OK.** Encoder counts **one per detent** despite the unthrottled main loop, and the **SDRAM check passes** - the two blockers, both clear. |
+| `passthrough` | |
+| `chorus` | first Faust-generated engine |
+| `filter` | dual mono: IN1 -> deck A -> OUT1, IN2 -> deck B -> OUT2, no interaction and **no routing switch** (its wrapper returns `live_configs() == 0` deliberately) |
+| `reverb` | first engine to allocate from the SDRAM arena |
+| `delay` | **after Bug 1 fix** |
+| `gigaverb` | **after Bug 2 fix**; gen~ runtime on the arena |
+| `voice` | instrument, makes sound with no input |
+| `qdelay` | had Bug 1 identically; fixed by the same `ParamUI` change, which is evidence the fix generalises |
+| `glitch` | 12 algorithms via the Aux selector; prompted the knob-gesture change below |
+| `edrums` | four voices on the transport; drum swap is the action screen's `alt` row |
 
-Both were invisible to the host suite, and the reason is the same in each case: **every host test
-picked a comfortable mid-range value.** The logic was correct for the cases written down; the
-interesting cases were all at or beyond the boundaries. Both were found within a minute of flashing.
+### PARKED - needs a fresh look
 
-**Bug 1 — `delay`: `tone` and `division` maxed and unresponsive.** `DelayEngine::init()` boots both at
-1.0 on purpose (so Clean boots transparent). Soft-takeover catches a knob by CROSSING its value, and
-crossing needs `knob >= value` — which an ADC essentially never satisfies for a value of exactly 1.0.
-The only remaining route was the 0.02 proximity window, so both knobs were dead across 98% of their
-travel. Two of the four knobs on that engine's first page.
+**`granular`** - records and plays according to its own state, but produces **no audible output**.
 
-*Pre-existing, not introduced by the session's pickup work* - the crossing test required `knob >= value`
-before that change too. Fixed with `kEndCatchWindow` (0.10, applied only when the value sits against an
-endpoint) plus a direction marker on uncaught rows: `>` turn up, `<` turn down, replacing a bare `.`
-that said only "not live". The trade is explicit - catching at the edge of the wider window moves the
-param by up to 10% at once, which beats a knob that does nothing until the last 2% of its rotation.
+What is known, so nobody re-derives it:
 
-**Bug 2 — `gigaverb`: `pos` reported ~12 and its knob was dead permanently.** The gen~ export defaults
-`revtime` to 11 while its setter clamps to [0.1, 1] and it advertises that same range, so the
-normalized read came out at 12.1. A value above 1 is worse than a wrong number: the knob tops out at
-1.0, so neither the crossing test nor the proximity window can EVER fire. Fixed at both layers - the
-engine's `get_param` now honours the contract's 0..1, and `ParamUI` enforces the range rather than
-trusting it, because "a knob that can never be caught" is a disproportionate failure for a
-few-percent reporting error.
+- `REC` and `PLY` appear in the header as expected, so the `rec`/`play` rows reach the engine, the deck
+  arms, the start condition fires and playback runs. The transport chain
+  (`Core::_on_transport_tick` -> `deck.tick(e.tick, e.key)`) was traced and is correct.
+- It boots at `Mode::None`, where `_set_buf_armed()` is a no-op, so `rec` could never start until a
+  mode was set. Fixed - see Bug 3.
+- `Mix` and `Feedback` were misreported as 0 (real values 0.5 and 0.95). Fixed - see Bug 4. Confirmed
+  on hardware: the rows now read **50** and **95**.
+- Despite all of the above, still silent. So the fault is **downstream of the param cache**, in the
+  audio path or in another unseeded global.
 
-**Still open, and a manifest question rather than a platform one:** `revtime` boots at 11 but clamps to
-1, so the reverb starts with an ~11 s tail that collapses to <=1 s the moment the knob is touched, with
-no way back. Either the declared range is wrong (gigaverb's revtime is conventionally in SECONDS) or
-the default is stale from a patch edit. Deliberately not changed here - it alters how the engine sounds
-at boot.
+Next things to look at, in order:
 
-**Not yet confirmed on hardware**, and deliberately not marked as passing: the four UI behaviours
-changed in this session (boot pickup priming, the header tempo, the OLED engine page, the
-action-screen cursor rule) and the `config()` reader's `1/3`-not-`-/3` display. "The engine works"
-does not cover them, and they are host-tested only. See the per-stage checklists below.
+1. **`Crossfade`** - in `live_params`, never seeded, so `param()` reports 0 and the same catch-and-write
+   mechanism that killed `mix` applies. Deliberately not seeded this session because no getter for the
+   engine's real value was found, and guessing a default would have risked a fourth instance of the
+   same bug. Find or add the getter, then seed it.
+2. **`Route`** - what Core's default route actually is, and whether that topology reaches OUT 1/2.
+3. **The remaining 9 unseeded live params** (`Env`, `EnvSize`, `Win`, `PolySlice`, `Speed`, `ModAmp`,
+   `ClickMix`, `PanSpeed`, `PanRange`, `Crossfade`). `init()` seeds 8 of 19. Any of them could be
+   misreporting; `Speed` is the one most likely to silence playback.
+4. Whether the deck buffer actually captures input - `REC` proves the state machine, not the data path.
+
+### Untested
+
+`graincloud`, `reso`, `mosc`, and the six SD engines (`radio`, `tape`, `shuttle`, `pstretch`,
+`softcut`, `bard`).
+
+Notes for when they are picked up:
+
+- **`graincloud`** shares granular's tree and had the identical Bug 3 and Bug 4, fixed alongside it. It
+  will very likely show the same silence, so it is probably not worth flashing until `granular` is
+  understood.
+- **`mosc`** is the only `BOOT_QSPI` build. If `program-dfu` misbehaves there, that is the first
+  suspect, not the engine.
+- **The six SD engines** need the card in **before power-on**. `make sd-card SD=/path` - the tree is
+  generated and `make sd-verify` passes.
+- **`radio`, `tape`, `shuttle`, `softcut`** boot at `Route::DoubleMono`, i.e. selector position 2.
+  Their `route` row should read **2/3**, and that is a behaviour fix, not just a display one: before
+  `config()` the first click on that row silently moved them to Stereo.
+- **`bard`** boots paused by design; use the action screen to start it. It is the only engine that
+  writes a file to the card (its resume table), so it is worth power-cycling to check the resume.
+
+### Not verified even on the "working" engines
+
+Reported as "works" means the engine made its noise. These were **not** separately confirmed and are
+still host-tested only:
+
+- boot pickup priming (params must not snap to knob positions at power-on)
+- the header tempo readout
+- the OLED engine page (last page in the rotation)
+- the action-screen cursor rule
+- `config()` showing a real position instead of `-/3`
+
+## Bugs found on hardware
+
+Four, all found within minutes of flashing, none visible to the host suite. Three share a root cause:
+**`IEngine::param()` not telling the truth about engine state.** That is worse than it sounds in a
+system with soft-takeover, because pickup's whole job is to trust that value and write it - so a
+read-back bug becomes a write bug.
+
+The reason none showed up in 144 mutation-verified host cases is the same each time: every test picked
+a **valid, mid-range, initialised** value. The logic was right for the states written down; every real
+defect lived in a state that had not been imagined - at the boundary, past it, or uninitialised.
+
+**Bug 1 - `delay`/`qdelay`: `tone` and `division` maxed and unresponsive.** `init()` boots both at 1.0
+on purpose. Soft-takeover catches by CROSSING the value, and crossing needs `knob >= value` - which an
+ADC essentially never satisfies at exactly 1.0. Only the 0.02 proximity window remained, so both knobs
+were dead across 98% of their travel. *Pre-existing, not introduced by this session's pickup work.*
+Fixed with `kEndCatchWindow` (0.10, endpoint values only) plus a direction marker on uncaught rows:
+`>` turn up, `<` turn down, replacing a bare `.` that said only "not live".
+
+**Bug 2 - `gigaverb`: `pos` reported ~12 and its knob was dead permanently.** The gen~ export defaults
+`revtime` to 11 while its setter clamps to [0.1, 1] and it advertises that range, so the normalized
+read was 12.1. A value above 1 cannot be caught at all - the knob tops out at 1.0. Fixed at both
+layers: the engine's `get_param` honours the contract's 0..1, and `ParamUI` enforces the range rather
+than trusting it.
+
+*Still open, and a manifest question:* `revtime` boots at 11 but clamps to 1, so the reverb starts with
+an ~11 s tail that collapses to <=1 s on first touch, with no way back. Either the declared range is
+wrong (gigaverb's revtime is conventionally in SECONDS) or the default is stale. Not changed here - it
+alters how the engine sounds at boot.
+
+**Bug 3 - `granular`/`graincloud`: would not record.** A deck constructs at `Mode::None`, and
+`_set_buf_armed()` has an empty `case Mode::None: break;` - so `rec` armed a deck that could never
+start, and the engine has no audio until it records. Inert from boot with nothing indicating why.
+Fixed by implementing `config()` for both engines (reading Route/ModType/Mode back from Core) and
+teaching the action screen's first-visit cursor to land on a switch the engine reports as **unset**.
+That refines the earlier "never land on a config" rule rather than contradicting it: clicking a switch
+with no position cannot lose anything, while clicking one that has a position would change it blind.
+
+**Bug 4 - `granular`/`graincloud`: `Mix` and `Feedback` misreported as 0.** `init()` seeds 8 of 19 live
+params; the deck's real defaults are `_in_out_mix = 0.5` and `_feedback = kDefaultFeedback` (0.95).
+Because pickup catches AT the reported value, the first touch of the mix knob wrote 0 and killed the
+deck's output. Fixed by seeding both from the deck itself (two new const getters) rather than copying
+literals, so there is one source of truth.
+
+## Changes made from bench feedback
+
+- **The Aux selector now follows KNOB 1** while the encoder is held, not the encoder's rotation. That
+  is upstream's Alt+PITCH gesture and what the rest of this repo already does (`pod/README.md`:
+  "turn knob 1 while holding"); `app/harness.cpp` was the outlier. Knob 1 is lent for the duration
+  (`ParamUI::set_knob_suspended`) so it is not also writing its own param, and it re-catches on
+  release. The encoder nudge is kept as a fine adjustment.
+- **The header shows the engine's transport state** - `REC` / `ARM` / `QUE` / `PLY` from
+  `IEngine::play_leds()` - taking priority over the tempo. Without it `granular` was undiagnosable:
+  silent by design, drawing no panel, on a board with no LEDs, so "nothing happens" could equally be a
+  pad that never arrived, a deck waiting on a start condition, or a recording of silence. This is what
+  turned the granular investigation from guesswork into measurement.
+
+## Process notes for next time
+
+- **Verify the write before asking for a result.** `grep "File downloaded successfully"` in the flash
+  log. A test cycle was wasted reporting on an image that had never been written.
+- **One flash loop at a time.** `program-dfu` writes whatever `.bin` is in the build directory *when it
+  fires*, not when the loop started, so overlapping loops make "which binary is on the board"
+  ambiguous exactly when it matters.
+- **"The engine works" is not the same as "the checklist passed."** Keep them separate in this file.
 
 ## What this board can and cannot show
 

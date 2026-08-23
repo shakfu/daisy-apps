@@ -65,6 +65,12 @@ public:
     void reset_track_divider() { _pattern_divider.reset(); }
 
     float norm_start() const;
+    // Read-back for the platform-facing param cache in granular_engine.cpp. Without these the cache
+    // reports 0 for both, the screen shows 0, and - worse - the knob catches at that reported 0 and
+    // WRITES it, dropping the real value. A misreported default does not just mislead the display; it
+    // destroys the setting on first touch.
+    float in_out_mix() const { return _in_out_mix; }
+    float feedback() const { return _feedback; }
     void set_start(const float);
     void start_mod_in(const float);
     void set_start_mod_on(const bool);

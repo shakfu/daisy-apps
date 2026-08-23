@@ -41,6 +41,7 @@ public:
     // the side effects (panner inference on mode/route, per-deck LFO palette). set_config returns
     // whether Mode changed; toggle_grit_mode returns the reseed values; tempo_to_fit the fit BPM.
     bool       set_config(ConfigId id, DeckRef::Ref deck, int value) override;
+    int        config(ConfigId id, DeckRef::Ref deck) const override;   // see IEngine::config
     float      tempo_to_fit(DeckRef::Ref deck, float fraction) override;
     GritReseed toggle_grit_mode(DeckRef::Ref deck) override;
 
