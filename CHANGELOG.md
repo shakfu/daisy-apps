@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`IEngine::config(ConfigId, DeckRef::Ref)`** — the categorical read-back the contract never had,
+  and the counterpart to `set_config`. Without it the platform's only honest source for a switch
+  position is what it last *wrote*, so before the user touches a switch its position is unknown:
+  `app/param_ui.h` prints `-/3`, because a plausible number is worse than a visible blank. The cost
+  was that a `reverb` booted showing `mode -/3` with no way to learn whether you were hearing
+  Dattorro, Zita or Greyhole except by changing it — losing the one you booted into.
+  - The default of `-1` ("not reported") is exactly the previous behaviour, so an engine that says
+    nothing is unaffected and no port has to change; the platform keeps its write-cache fallback for
+    those. An engine that answers gets an honest display from boot, and its switch cycles from where
+    it actually is.
+  - **This fixes behaviour, not just display.** `radio`, `shuttle`, `softcut` and `tape` boot at
+    `Route::DoubleMono`, which is selector position 2 — so the old "first click selects position 1"
+    rule silently moved them to Stereo the first time that row was used.
+  - Implemented for eleven engines: `delay`, `qdelay`, `reverb`, `edrums`, `glitch`, `radio`,
+    `shuttle`, `softcut`, `tape`, `reso`, `mosc`. `bard`, `pstretch`, `granular` and `graincloud`
+    keep the fallback — their switch state is held further inside the engine and reporting it is not
+    a three-line change.
+- **`route_to_config()` / `config_to_route()`** in `engine/mode.h`. The selector index
+  `ConfigId::Route` carries is *not* the `Route` enum's own numbering (the enum starts at 1, in a
+  different order), and every engine hand-rolls the int→`Route` direction inside its own
+  `set_config`. The inverse now exists in one place, which is what the new `config()` overrides answer
+  with — and it is covered by a round-trip test, because a mismatch would report the wrong topology.
+
 - **Engine panels reach the board's LEDs** (`app/display_adapter.h`). `IEngine::render(DisplayModel&)`,
   the `engine/indicators.h` palette/motion/ring vocabulary and `LEDRing` had never been called by
   anything: twelve files in `src/engine/` implemented a panel that never lit. On a Pod — the only

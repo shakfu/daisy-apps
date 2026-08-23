@@ -61,6 +61,13 @@ public:
     void  set_param(ParamId id, DeckRef::Ref d, float v) override;
     float param(ParamId id, DeckRef::Ref d) const override;
     bool  set_config(ConfigId id, DeckRef::Ref, int value) override;     // routing switch -> per-track pan
+    // Report the routing switch so the platform's action screen can show its position from boot
+    // instead of `-/3`. This engine boots at Route::DoubleMono, which is NOT selector position 1 - so without
+    // this the first click on that row silently moved it. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref) const override
+    {
+        return (id == ConfigId::Route) ? route_to_config(_route) : -1;
+    }
     Route route() const override { return _route; }
 
 #if SPK_TERMINAL

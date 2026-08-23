@@ -264,6 +264,17 @@ struct ResoEngine::Impl {
         return false;
     }
 
+    // The inverse of the mapping above, for IEngine::config: the platform asks which voice mode this
+    // deck is in so its action screen can show the position from boot rather than `-/3`.
+    int config(ConfigId id, DeckRef::Ref deckr) const {
+        if (id != ConfigId::Mode) return -1;
+        switch (deck[safe(deckr)].mode) {
+            case Mode::Drift: return 2;
+            case Mode::Reel:  return 1;
+            default:          return 0;   // Slice
+        }
+    }
+
     DeckRef::Ref handle_midi_note(uint8_t channel, uint8_t note) {
         const DeckRef::Ref d = (channel & 1) ? DeckRef::B : DeckRef::A;
         deck[d].pitch_n = clampf((static_cast<float>(note) - 24.f) / 60.f, 0.f, 1.f);
@@ -336,6 +347,7 @@ float ResoEngine::param(ParamId id, DeckRef::Ref d) const        { return _p ? _
 void  ResoEngine::set_mod_speed(DeckRef::Ref d, float v, bool)   { if (_p) _p->set_mod_speed(d, v); }
 void  ResoEngine::set_aux_active(DeckRef::Ref d, bool held)      { if (_p) _p->set_aux_active(d, held); }
 bool  ResoEngine::set_config(ConfigId id, DeckRef::Ref d, int v) { return _p ? _p->set_config(id, d, v) : false; }
+int   ResoEngine::config(ConfigId id, DeckRef::Ref d) const     { return _p ? _p->config(id, d) : -1; }
 
 DeckRef::Ref ResoEngine::handle_midi_note(uint8_t ch, uint8_t note)
 {

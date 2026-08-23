@@ -79,6 +79,25 @@ public:
     //     deck's loop (the Slice tap-hold gesture). toggle_grit_mode cycles the grit sub-effect and
     //     returns the now-active intensity/mix for the platform's MValue reseed. ---
     virtual bool       set_config(ConfigId, DeckRef::Ref, int) { return false; }
+
+    // Read back a categorical switch: the selector index this engine is CURRENTLY at, or -1 for
+    // "not reported". The counterpart to set_config, and the one direction the contract has never had.
+    //
+    // Why it matters. Without a reader the platform's only honest source for a switch position is what
+    // it last WROTE - so before the user touches a switch, its position is unknown. A UI can either
+    // print a guess or print nothing; app/param_ui.h prints `-/3`, because a plausible number is worse
+    // than a visible blank. The cost is that a `reverb` boots showing `mode -/3` and there is no way to
+    // learn whether you are hearing Dattorro, Zita or Greyhole except by changing it - which loses the
+    // one you booted into. The same goes for every engine whose Route or Mode defaults to something
+    // other than position 1.
+    //
+    // The default of -1 is exactly today's behaviour, so an engine that says nothing is unaffected and
+    // no port has to change: the platform keeps its write-cache fallback for those. An engine that does
+    // answer gets an honest display from boot, and its switch cycles from where it actually IS rather
+    // than from the platform's guess.
+    //
+    // `deck` is ignored for global configs (Route), matching set_config.
+    virtual int        config(ConfigId, DeckRef::Ref) const { return -1; }
     virtual float      tempo_to_fit(DeckRef::Ref, float fraction) { return 0.f; }
     virtual GritReseed toggle_grit_mode(DeckRef::Ref) { return {}; }
 

@@ -24,6 +24,25 @@ enum class Route: uint8_t {
     GenerativeStereo
 };
 
+// Route <-> the selector index ConfigId::Route carries on the wire (engine_params.h: 0 = Stereo,
+// 1 = DoubleMono, 2 = GenerativeStereo). NOT the same numbers as the enum, which starts at 1 in a
+// different order - which is exactly why this belongs in one place: every engine hand-rolls the
+// int->Route direction inside its own set_config, and each copy is a chance to get it wrong.
+// route_to_config is the inverse those engines need to ANSWER IEngine::config().
+inline constexpr int route_to_config(Route r)
+{
+    switch (r) {
+        case Route::DoubleMono:       return 1;
+        case Route::GenerativeStereo: return 2;
+        default:                      return 0;   // Stereo
+    }
+}
+
+inline constexpr Route config_to_route(int v)
+{
+    return v == 2 ? Route::GenerativeStereo : v == 1 ? Route::DoubleMono : Route::Stereo;
+}
+
 // The remaining engine-facing enums the platform reads via the engine_leds query structs (item 5b).
 // Contract-owned so engine_leds.h / the platform LED code no longer include core/modulator.h,
 // core/fx.h, core/deck.h. The granular classes alias these (`using Type = ModType;` etc.), so their

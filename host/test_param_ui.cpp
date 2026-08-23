@@ -768,4 +768,157 @@ TEST(the_action_screen_still_draws_over_the_engine_page)
     CHECK_EQ(board.updates, 1);
 }
 
+// --- IEngine::config, the categorical read-back --------------------------------------------------
+//
+// Without it the platform's only honest source for a switch position is what it last WROTE, so before
+// the user touches a switch its position is unknown and the row reads `-/3`. An engine that answers
+// gets an honest display from boot, and its switch cycles from where it actually is.
+
+TEST(a_reporting_engine_shows_its_switch_position_from_boot)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Mode});
+    e.reports_config = true;
+    e.set_config_value(ConfigId::Mode, DeckRef::A, 2);      // booted at the third position
+
+    UI ui;
+    ui.init(e, 4, 0);
+    ui.open_actions(e, 0);
+
+    FakeBoard board;
+    ui.render(board, e, "reverb", 120.f, 1000);
+    CHECK(board.drew("3/3"));           // ...and says so, before anything has been clicked
+    CHECK(!board.drew("-/3"));
+}
+
+// The behaviour half, and the one that matters more than the display: several engines boot at
+// Route::DoubleMono, which is selector position 2. Advancing from the platform's old guess moved them
+// somewhere else entirely on the very first click.
+TEST(a_reporting_switch_cycles_from_where_it_actually_is)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Route});
+    e.reports_config = true;
+    e.set_config_value(ConfigId::Route, DeckRef::A, 1);     // DoubleMono, i.e. position 2 of 3
+
+    UI ui;
+    ui.init(e, 4, 0);
+    ui.open_actions(e, 0);
+    ui.move_cursor(1, 0);                                   // onto the route row
+    CHECK_EQ(static_cast<int>(ui.fire(e, 0)), static_cast<int>(ActionRow::Config));
+
+    CHECK_EQ(e.configs.size(), 1u);
+    CHECK_EQ(e.configs[0].value, 2);    // 1 -> 2, not the old "select position 1"
+}
+
+TEST(a_reporting_engine_wraps_at_the_top_of_the_range)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Mode});
+    e.reports_config = true;
+    e.set_config_value(ConfigId::Mode, DeckRef::A, 2);      // last position of a ternary switch
+
+    UI ui;
+    ui.init(e, 4, 0);
+    ui.open_actions(e, 0);
+    ui.move_cursor(1, 0);
+    ui.fire(e, 0);
+    CHECK_EQ(e.configs.back().value, 0);
+}
+
+// An engine that does not report keeps exactly the old behaviour: unknown until written, and the
+// first click SELECTS position 1 rather than advancing from a guess.
+TEST(a_silent_engine_keeps_the_unknown_and_the_select_first_rule)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Mode});
+    e.reports_config = false;
+    e.set_config_value(ConfigId::Mode, DeckRef::A, 2);      // true state, which it will not admit to
+
+    UI ui;
+    ui.init(e, 4, 0);
+    ui.open_actions(e, 0);
+
+    FakeBoard board;
+    ui.render(board, e, "granular", 120.f, 1000);
+    CHECK(board.drew("-/3"));
+
+    ui.move_cursor(1, 1000);
+    ui.fire(e, 1000);
+    CHECK_EQ(e.configs.size(), 1u);
+    CHECK_EQ(e.configs[0].value, 0);    // select, do not advance
+}
+
+// The reader is per-deck for a per-deck switch, and the row follows the focused deck.
+TEST(a_reporting_switch_is_read_per_deck)
+{
+    FakeEngine e;
+    e.caps           = CapDualDeck;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Mode});
+    e.reports_config = true;
+    e.set_config_value(ConfigId::Mode, DeckRef::A, 0);
+    e.set_config_value(ConfigId::Mode, DeckRef::B, 2);
+
+    UI ui;
+    ui.init(e, 4, 0);
+    ui.open_actions(e, 0);
+
+    FakeBoard a;
+    ui.render(a, e, "x", 120.f, 1000);
+    CHECK(a.drew("1/3"));
+
+    ui.set_deck(DeckRef::B, e);
+    FakeBoard b;
+    ui.render(b, e, "x", 120.f, 2000);
+    CHECK(b.drew("3/3"));
+}
+
+// ...and once it HAS written, a silent engine still cycles from its own cache rather than resetting.
+TEST(a_silent_engine_cycles_from_its_own_write_cache)
+{
+    FakeEngine e;
+    e.param_mask     = mask_of({ParamId::Pos});
+    e.config_mask    = config_mask_of({ConfigId::Mode});
+    e.reports_config = false;
+
+    UI ui;
+    ui.init(e, 4, 0);
+    ui.open_actions(e, 0);
+    ui.move_cursor(1, 0);                       // onto the mode row
+
+    ui.fire(e, 0);                              // first click SELECTS position 1
+    CHECK_EQ(e.configs.back().value, 0);
+    ui.fire(e, 0);                              // thereafter it advances...
+    CHECK_EQ(e.configs.back().value, 1);
+    ui.fire(e, 0);
+    CHECK_EQ(e.configs.back().value, 2);
+    ui.fire(e, 0);                              // ...and wraps
+    CHECK_EQ(e.configs.back().value, 0);
+}
+
+// The wire mapping ConfigId::Route carries is NOT the Route enum's own numbering - the enum starts at
+// 1 and in a different order. Every engine hand-rolls the int->Route direction inside its set_config;
+// route_to_config is the inverse they use to answer config(), so the two must agree exactly or a
+// reported position would name the wrong topology.
+TEST(route_and_its_selector_index_round_trip)
+{
+    CHECK_EQ(route_to_config(Route::Stereo),           0);
+    CHECK_EQ(route_to_config(Route::DoubleMono),       1);
+    CHECK_EQ(route_to_config(Route::GenerativeStereo), 2);
+
+    for (int v = 0; v < 3; v++) CHECK_EQ(route_to_config(config_to_route(v)), v);
+
+    // ...and the int->Route half matches what the engines actually write (2 = generative, 1 = double
+    // mono, anything else = stereo).
+    CHECK(config_to_route(0) == Route::Stereo);
+    CHECK(config_to_route(1) == Route::DoubleMono);
+    CHECK(config_to_route(2) == Route::GenerativeStereo);
+    CHECK(config_to_route(99) == Route::Stereo);    // out of range falls back, never wraps
+}
+
 int main() { return daisyapps::test::run_all(); }

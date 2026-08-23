@@ -239,6 +239,14 @@ struct MoscEngine::Impl {
         return false;
     }
 
+    // The inverse of the mapping above, for IEngine::config - see the note on that method. Route is
+    // global; Mode is the per-deck Gate/Drone trigger behaviour, where 0 is Gate.
+    int config(ConfigId id, DeckRef::Ref deckr) const {
+        if (id == ConfigId::Route) return route_to_config(_route);
+        if (id == ConfigId::Mode)  return deck[safe(deckr)].mode == Mode::Gate ? 0 : 1;
+        return -1;
+    }
+
     Route route() const { return _route; }
 
     DeckRef::Ref handle_midi_note(uint8_t channel, uint8_t note) {
@@ -303,6 +311,7 @@ float MoscEngine::param(ParamId id, DeckRef::Ref d) const        { return _p ? _
 void  MoscEngine::set_mod_speed(DeckRef::Ref d, float v, bool)   { if (_p) _p->set_mod_speed(d, v); }
 void  MoscEngine::set_aux_active(DeckRef::Ref d, bool held)      { if (_p) _p->set_aux_active(d, held); }
 bool  MoscEngine::set_config(ConfigId id, DeckRef::Ref d, int v) { return _p ? _p->set_config(id, d, v) : false; }
+int   MoscEngine::config(ConfigId id, DeckRef::Ref d) const     { return _p ? _p->config(id, d) : -1; }
 Route MoscEngine::route() const                                  { return _p ? _p->route() : Route::Stereo; }
 
 DeckRef::Ref MoscEngine::handle_midi_note(uint8_t ch, uint8_t note)

@@ -81,6 +81,14 @@ public:
     void  set_mod_speed(DeckRef::Ref deck, float value, bool sync) override; // MODFREQ -> mod LFO rate
     bool  on_play_pad(DeckRef::Ref deck, bool reverse) override;             // Play -> Freeze, Rev -> Reverse
     bool  set_config(ConfigId id, DeckRef::Ref deck, int value) override;    // Mode -> character; Route -> topology
+    // Report both switches so the platform's action screen shows their positions from boot instead of
+    // `-/3`, and cycles each from where it actually is. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref deck) const override
+    {
+        if (id == ConfigId::Route) return route_to_config(_route);
+        if (id == ConfigId::Mode)  return static_cast<int>(_mode[_safe(deck)]);
+        return -1;
+    }
     Route route() const override { return _route; }
     void  render(DisplayModel& m) override;
 

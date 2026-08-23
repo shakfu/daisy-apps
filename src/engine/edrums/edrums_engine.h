@@ -93,6 +93,12 @@ public:
     float param(ParamId id, DeckRef::Ref deck) const override;
     void  set_mod_speed(DeckRef::Ref deck, float value, bool sync) override; // MODFREQ -> division
     bool  set_config(ConfigId id, DeckRef::Ref deck, int value) override;    // routing switch -> output mode
+    // Report the routing switch so the platform's action screen shows its position from boot instead
+    // of `-/3`, and cycles from where the switch actually is. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref) const override
+    {
+        return (id == ConfigId::Route) ? route_to_config(_route) : -1;
+    }
     Route route() const override { return _route; }                         // mode L/C/R LED
     void  set_aux_active(DeckRef::Ref deck, bool active) override;           // Alt+PITCH held -> model selector
 

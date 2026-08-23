@@ -87,6 +87,12 @@ public:
     float param(ParamId id, DeckRef::Ref d) const override;
     void  set_aux_active(DeckRef::Ref d, bool held) override;
     bool  set_config(ConfigId id, DeckRef::Ref, int value) override;
+    // Report the routing switch so the platform's action screen shows its position from boot instead
+    // of `-/3`, and cycles from where the switch actually is. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref) const override
+    {
+        return (id == ConfigId::Route) ? route_to_config(_route) : -1;
+    }
     Route route() const override { return _route; }
 
     bool  on_play_pad(DeckRef::Ref d, bool reverse) override;   // regenerate the glitch buffer

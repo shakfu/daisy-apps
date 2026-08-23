@@ -289,11 +289,20 @@ public:
                 const int     c    = static_cast<int>(r.cfg);
                 const int     d    = (_deck == DeckRef::A) ? 0 : 1;
                 const uint8_t span = r.span ? r.span : 1;
-                // A switch this UI has not written yet is UNKNOWN, not zero - the engine booted at
-                // whatever default it chose and the contract has no reader. So the first click
-                // SELECTS position 1 rather than advancing from a guess; every click after that
-                // cycles. From here on the screen and the engine agree by construction.
-                const uint8_t v = _cfg_known[c][d] ? static_cast<uint8_t>((_cfg[c][d] + 1) % span) : 0;
+                // Where to cycle FROM, in order of how much the answer can be trusted:
+                //   1. the engine itself (IEngine::config), which knows;
+                //   2. what this UI last wrote, if it has written at all;
+                //   3. nothing - so SELECT position 1 rather than advance from a guess.
+                // (3) is the pre-reader behaviour and remains correct for an engine that reports
+                // nothing; (1) is what makes a switch advance from where it actually is rather than
+                // from where the platform assumed.
+                const int     cur  = engine.config(r.cfg, _deck);
+                const uint8_t from = (cur >= 0)          ? static_cast<uint8_t>(cur)
+                                   : _cfg_known[c][d]    ? _cfg[c][d]
+                                                         : 0;
+                const uint8_t v    = (cur >= 0 || _cfg_known[c][d])
+                                       ? static_cast<uint8_t>((from + 1) % span)
+                                       : 0;
                 _cfg[c][d]       = v;
                 _cfg_known[c][d] = true;
                 if (r.cfg == ConfigId::Route) {                     // Route is global, not per-deck
@@ -333,7 +342,7 @@ public:
         if (now_ms - _last_draw_ms < static_cast<uint32_t>(1000 / kScreenHz)) return;
         _last_draw_ms = now_ms;
 
-        if (_actions) { render_actions(board, engine_name, status); return; }
+        if (_actions) { render_actions(board, engine, engine_name, status); return; }
 
         char line[32];
         board.ScreenClear();
@@ -521,7 +530,7 @@ private:
     // The list, four rows at a time, scrolled to keep the cursor visible with a row of context above
     // it where there is one. A switch shows its position (1-based, as a player counts) so a mode is
     // read off the screen instead of inferred from what changed in the sound.
-    void render_actions(Board& board, const char* engine_name, const char* status)
+    void render_actions(Board& board, IEngine& engine, const char* engine_name, const char* status)
     {
         char line[32];
         board.ScreenClear();
@@ -557,13 +566,16 @@ private:
                 std::snprintf(value, sizeof(value), "%s",
                               !_fx_known[f][d] ? "-" : (_fx_on[f][d] ? "on" : "off"));
             } else if (r.kind == ActionRow::Config) {
-                const int c = static_cast<int>(r.cfg);
-                const int d = (_deck == DeckRef::A) ? 0 : 1;
-                // '-' means "not known", not "off": until this row is used, the engine's switch is
-                // wherever the engine put it and nothing here can read it back. Printing a position
-                // would be a guess, and a plausible number is worse than a visible blank.
-                if (_cfg_known[c][d]) std::snprintf(value, sizeof(value), "%d/%d", _cfg[c][d] + 1, r.span);
-                else                  std::snprintf(value, sizeof(value), "-/%d", r.span);
+                const int c   = static_cast<int>(r.cfg);
+                const int d   = (_deck == DeckRef::A) ? 0 : 1;
+                const int cur = engine.config(r.cfg, _deck);
+                // Ask the engine first - it is the only source that is right before this UI has
+                // written anything. Failing that, what we last wrote. Failing that, '-', which means
+                // "not known" rather than "off": printing a position would be a guess, and a
+                // plausible number is worse than a visible blank.
+                if (cur >= 0)              std::snprintf(value, sizeof(value), "%d/%d", cur + 1, r.span);
+                else if (_cfg_known[c][d]) std::snprintf(value, sizeof(value), "%d/%d", _cfg[c][d] + 1, r.span);
+                else                       std::snprintf(value, sizeof(value), "-/%d", r.span);
             }
 
             std::snprintf(line, sizeof(line), "%c%-10.10s %s",

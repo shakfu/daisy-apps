@@ -125,7 +125,20 @@ public:
     bool set_config(ConfigId id, DeckRef::Ref d, int v) override
     {
         configs.push_back({id, d, v});
+        cfg_value[static_cast<uint8_t>(id)][deck_index(d)] = v;
         return true;
+    }
+
+    // IEngine::config. Off by default (-1 = "not reported"), which is what an engine that has not
+    // opted in does - so a test can exercise both the reporting and the fallback path.
+    int config(ConfigId id, DeckRef::Ref d) const override
+    {
+        return reports_config ? cfg_value[static_cast<uint8_t>(id)][deck_index(d)] : -1;
+    }
+
+    void set_config_value(ConfigId id, DeckRef::Ref d, int v)
+    {
+        cfg_value[static_cast<uint8_t>(id)][deck_index(d)] = v;
     }
 
     // --- pads: overridden so engine_pads.h's detection reports them -----------------------------
@@ -152,6 +165,8 @@ public:
     std::vector<SetConfig> configs;
     int  plays = 0, records = 0;
     bool last_reverse = false;
+    bool reports_config = false;                                // does this engine answer config()?
+    int  cfg_value[static_cast<int>(ConfigId::Count)][2] = {};  // what it would answer
 };
 
 // Build a ParamMask from a list of ParamIds.

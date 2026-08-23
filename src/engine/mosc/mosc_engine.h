@@ -89,6 +89,7 @@ public:
     void  set_mod_speed(DeckRef::Ref deck, float value, bool sync) override;
     void  set_aux_active(DeckRef::Ref deck, bool active) override;
     bool  set_config(ConfigId id, DeckRef::Ref deck, int value) override;
+    int   config(ConfigId id, DeckRef::Ref deck) const override;   // see IEngine::config
     Route route() const override;   // global A/B->L/R routing (Stereo / DoubleMono / GenerativeStereo)
 
     DeckRef::Ref handle_midi_note(uint8_t channel, uint8_t note) override;

@@ -89,6 +89,14 @@ public:
     void  set_param(ParamId id, DeckRef::Ref deck, float value) override;
     float param(ParamId id, DeckRef::Ref deck) const override;
     bool  set_config(ConfigId id, DeckRef::Ref deck, int value) override; // Mode -> voice; Route -> topology
+    // Report both switches so the platform's action screen shows their positions from boot instead of
+    // `-/3`, and cycles each from where it actually is. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref deck) const override
+    {
+        if (id == ConfigId::Route) return route_to_config(_route);
+        if (id == ConfigId::Mode)  return static_cast<int>(_active[deck >= DeckRef::Count ? DeckRef::A : deck]);
+        return -1;
+    }
     Route route() const override { return _route; }                       // report topology for the route LED
     void  render(DisplayModel& m) override;
 

@@ -112,6 +112,13 @@ public:
     float param(ParamId id, DeckRef::Ref d) const override;
     void  set_aux_active(DeckRef::Ref d, bool held) override;   // Alt held -> show the bank selector
     bool  set_config(ConfigId id, DeckRef::Ref, int value) override; // routing switch -> stereo topology
+    // Report the routing switch so the platform's action screen can show its position from boot
+    // instead of `-/3`. This engine boots at Route::DoubleMono, which is NOT selector position 1 - so without
+    // this the first click on that row silently moved it. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref) const override
+    {
+        return (id == ConfigId::Route) ? route_to_config(_route) : -1;
+    }
     Route route() const override { return _route; }
 
     void  cv_voct(DeckRef::Ref d, float value) override;        // STATION CV

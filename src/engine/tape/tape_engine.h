@@ -129,6 +129,13 @@ public:
     void  set_mod_speed(DeckRef::Ref d, float v, bool sync) override; // MODFREQ -> tape wow/flutter rate
     void  set_aux_active(DeckRef::Ref d, bool held) override;   // Alt held -> show the slot selector
     bool  set_config(ConfigId id, DeckRef::Ref, int value) override;  // routing switch -> pan topology
+    // Report the routing switch so the platform's action screen can show its position from boot
+    // instead of `-/3`. This engine boots at Route::DoubleMono, which is NOT selector position 1 - so without
+    // this the first click on that row silently moved it. See IEngine::config.
+    int   config(ConfigId id, DeckRef::Ref) const override
+    {
+        return (id == ConfigId::Route) ? route_to_config(_route) : -1;
+    }
     Route route() const override { return _route; }                   // mode L/C/R LED
 
     bool  on_play_pad(DeckRef::Ref d, bool reverse) override;   // play toggle (Alt+Play -> record)
