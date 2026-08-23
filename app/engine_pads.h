@@ -74,6 +74,18 @@ SPK_DECLARES(disarm_track,       void, DeckRef::Ref)
 
 #undef SPK_DECLARES
 
+// Does this engine draw its own panel? Same language rule as the pads above, and the same reason for
+// preferring it to a declaration: capabilities()'s CapOwnDisplay is a hand-maintained claim, and this
+// file already exists because such claims drift (tape and shuttle implemented on_record_pad for their
+// whole life here while declaring no CapRecording). An engine that overrides render() gets its panel
+// projected; one that does not is left to the platform's own indicator fallback, with no bit to keep
+// in sync either way. See app/display_adapter.h.
+template <class E>
+constexpr bool engine_draws()
+{
+    return !std::is_same<decltype(&E::render), void (IEngine::*)(DisplayModel&)>::value;
+}
+
 template <class E>
 constexpr PadMask pad_mask()
 {
@@ -96,5 +108,7 @@ constexpr PadMask pad_mask()
 // this file rather than a fact about an engine.
 static_assert(pad_mask<IEngine>() == 0,
               "a signature in engine_pads.h no longer matches IEngine - fix it here, not in an engine");
+static_assert(!engine_draws<IEngine>(),
+              "engine_draws' signature no longer matches IEngine::render - fix it here, not in an engine");
 
 } // namespace daisyapps

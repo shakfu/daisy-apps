@@ -21,7 +21,7 @@ struct FakeBoard {
     static constexpr int  kAnalogCount    = 4;
     static constexpr int  kButtonCount    = 0;
     static constexpr int  kGateCount      = 2;
-    static constexpr int  kIndicatorCount = 0;
+    static constexpr int  kIndicatorCount = 2;
     static constexpr int  kCvOutCount     = 2;
     static constexpr int  kAudioChannels  = 4;
     static constexpr bool kHasScreen      = true;
@@ -29,15 +29,30 @@ struct FakeBoard {
     static constexpr int  kScreenHeight   = 64;
 
     struct Rect { int x, y, w, h; bool fill; };
+    // The last value written to each indicator, and how many writes it has had. Recorded rather than
+    // acted on, so a test asserts what a player would SEE - a colour and a brightness - instead of a
+    // call sequence.
+    struct Led { float r = 0.f, g = 0.f, b = 0.f; int writes = 0;
+                 bool dark() const { return r <= 0.f && g <= 0.f && b <= 0.f; }
+                 float peak() const { return r > g ? (r > b ? r : b) : (g > b ? g : b); } };
 
     std::vector<std::string> lines;    // every ScreenText of the CURRENT frame
     std::vector<Rect>        rects;
     int                      updates = 0;
+    Led                      led[4];
+    bool                     user_led = false;
 
     void ScreenClear() { lines.clear(); rects.clear(); }
     void ScreenText(int, int, const char* text, bool = true) { lines.emplace_back(text); }
     void ScreenRect(int x, int y, int w, int h, bool fill) { rects.push_back({x, y, w, h, fill}); }
     void ScreenUpdate() { updates++; }
+
+    void SetIndicator(int idx, float r, float g, float b)
+    {
+        if (idx < 0 || idx >= kIndicatorCount) return;   // out of range is a no-op, as on a real board
+        led[idx] = { r, g, b, led[idx].writes + 1 };
+    }
+    void SetUserLed(bool on) { user_led = on; }
 
     // True if any drawn line contains `needle`.
     bool drew(const char* needle) const
@@ -60,6 +75,19 @@ struct FakeScreenlessBoard : FakeBoard {
     static constexpr bool kHasScreen   = false;
     static constexpr int  kAnalogCount = 2;
     static constexpr int  kGateCount   = 0;
+};
+
+// A board with no discrete LEDs at all - the Daisy Patch, which has the OLED instead. The display
+// adapter must compile away to nothing against this rather than write somewhere harmless.
+struct FakeLedlessBoard : FakeBoard {
+    static constexpr int kIndicatorCount = 0;
+};
+
+// A single mono LED, as on patch.init(): its driver collapses any colour to on/off, which is why the
+// adapter has a brightness floor at all.
+struct FakeMonoBoard : FakeBoard {
+    static constexpr bool kHasScreen      = false;
+    static constexpr int  kIndicatorCount = 1;
 };
 
 // An IEngine that stores its params, records the calls it received, and lets a test declare which

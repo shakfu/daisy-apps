@@ -27,6 +27,8 @@
 // Define exactly one TARGET_* (the Makefiles pass -DTARGET_POD). `Board` then aliases the concrete
 // class, so the harness writes `daisyapps::Board board;` and stays board-agnostic. No virtual
 // dispatch: the selection is resolved at compile time, and a build links only its board's driver.
+#include "board/board_contract.h"   // the compile-time check applied to the selection below
+
 #if defined(TARGET_POD)
 #include "board/pod_board.h"
 namespace daisyapps { using Board = PodBoard; }
@@ -39,3 +41,11 @@ namespace daisyapps { using Board = PatchBoard; }
 #else
 #error "daisy-apps board: define exactly one of TARGET_POD / TARGET_PATCH_INIT / TARGET_PATCH"
 #endif
+
+// Assert the selected driver satisfies the surface documented above. Duck typing means nothing else
+// would: only one driver compiles per build, so a member that goes missing is invisible until some
+// other target is selected, and a member nothing in THIS build happens to call is invisible even then.
+// board_contract.h names each requirement individually, so a failure says which method and what shape.
+namespace daisyapps {
+static_assert(check_board_contract<Board>(), "the selected board does not satisfy the board contract");
+}

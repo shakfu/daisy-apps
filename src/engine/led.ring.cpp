@@ -1,5 +1,11 @@
 #include "led.ring.h"
 
+// std::round, used by set_segment/add_point below. Included explicitly rather than inherited: it used
+// to arrive transitively (via the removed expose.h -> common.h -> <daisy.h> chain, and via the ARM
+// build's forced `-include stm32h7xx.h`), which is why its absence never showed up on target. The host
+// build has neither, so it showed up there. See src/math_util.h.
+#include <cmath>
+
 // Size-optimize: ring drawing primitives feed only the 62 Hz LED render, never the audio path.
 #pragma GCC optimize("Os")
 

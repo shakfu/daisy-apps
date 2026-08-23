@@ -8,6 +8,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Engine panels reach the board's LEDs** (`app/display_adapter.h`). `IEngine::render(DisplayModel&)`,
+  the `engine/indicators.h` palette/motion/ring vocabulary and `LEDRing` had never been called by
+  anything: twelve files in `src/engine/` implemented a panel that never lit. On a Pod — the only
+  hardware-validated target — that meant an engine was a two-knob black box with two dark LEDs. The
+  adapter projects a `DisplayModel` onto whatever indicators a board actually has: indicator 0 takes
+  the deck's transport state (already colour-coded by `transport_view()` — red recording, green
+  forward, cyan reverse), indicator 1 takes the deck's 32-pixel ring collapsed to one lamp. It is a
+  projection and not a blit, deliberately: one LED cannot represent thirty-two, and the collapse
+  policy is gathered into `ring_summary()` so it is in one place and can be argued with once someone
+  has looked at real hardware.
+  - An engine that draws **nothing** — most of them — gets a platform fallback instead of a dark
+    panel: the parameter page as a hue, and knob pickup state (red until every visible knob has been
+    swept across its value, green after). On a screenless board that is the only feedback the paged UI
+    has ever had, and its own comments say the page and the catch state are exactly what a player
+    cannot otherwise see.
+  - Whether an engine draws is **measured, not declared** (`engine_draws<E>()` in `app/engine_pads.h`),
+    for the reason that file already exists: `capabilities()`'s `CapOwnDisplay` is a hand-maintained
+    claim, and such claims have drifted here before.
+  - **The Daisy Patch gets an engine page** instead, since it has no discrete LEDs at all and the OLED
+    was the only route. `ParamUI` makes room for one extra page at the end of the rotation and draws
+    nothing while it shows; the adapter draws it. A 1-bit panel cannot paint colour — which is where
+    the transport state lives — but it can print the word: `transport_word()` inverts
+    `transport_view()`'s palette mapping, so the page reads `play:rec` / `play:fwd` / `play:rev`.
+    Rings become 32-cell bar strips (full bar / stub / nothing, enough to read a level arc, a playhead
+    or a selector) and lit indicators become words — more information than two RGB lamps, not less.
+    The knobs keep the params of the page you came from, so flipping over to watch a control does not
+    take the control away.
+  - Costs nothing where there is nothing to do: both axes are compile-time
+    (`DisplayAdapter<Board, Draws>`), so the ~2.3 KB `DisplayModel` is absent both for a board with
+    neither indicators nor a screen and for an engine that draws nothing. On the Patch, `granular`,
+    `graincloud` and `gigaverb` pay 8 bytes of `.bss` rather than 2304.
+  - Worth recording, because the review got it wrong: it reported "eleven engines implement
+    `render(DisplayModel&)`" from a file-level grep, which misses engines inheriting it from the Faust
+    bases. Compiling `engine_draws<ActiveEngine>()` for every engine and checking the resulting `.bss`
+    gives **17 of 20** — everything except `granular`, `graincloud` and `gigaverb`.
+- **`src/board/board_contract.h`** — a `static_assert` check that a board driver satisfies the surface
+  `board.h` documents, instantiated against whichever target was selected. The surface is duck-typed
+  and only one driver compiles per build, so a member that goes missing is invisible until someone
+  selects that target — which is how `patch_init_board.h` carried a call to libDaisy's removed
+  `dsy_gpio_write` across an API change unnoticed. One assert per member, each naming the method and
+  its expected shape, plus sanity on the values (a control count larger than the `Controls` snapshot
+  it fills would have `Poll()` overrun it).
+- **A fifth host suite, `host/test_display_adapter.cpp`** (22 cases), over the projection: colour and
+  brightness scaling, the ring collapse and its monotonicity, the mono-LED brightness floor, deck
+  focus, the platform fallback, rate limiting, and the board shapes that must compile away. Every
+  design decision in the adapter was mutation-checked — each deliberate break is caught by a named
+  test.
+
 - **Host test suite and `make test`** (`host/`). Four suites — 86 cases — over the platform layer's pure logic: the lock-free `SpscRing` and its `PlayStream`/`RecordStream` pumps, `WavStreamReader`'s chunk walk and the writer round-trip, `HarnessTransport`'s 48-PPQN tick grid and external-sync state machine, and `ParamUI`'s value pickup, page paging and generated action rows. Runs under AddressSanitizer + UndefinedBehaviorSanitizer by default (`make test SANITIZE=` to disable). The harness is a ~50-line header (`host/check.h`) with recording fakes for the Board and `IEngine` surfaces — no vendored framework, matching the stdlib-only convention in `scripts/`.
 
 - **`src/math_util.h`** — the scalar helpers the engine contract needs (`unitclamp`, `lerp`, `map`, ...), with no HAL dependency. `engine/color.h` now includes this instead of `common.h`, which is what makes `#include "engine/iengine.h"` compile under a plain host `g++`: its include closure drops from 339 headers to 80 under the ARM build, and to standard-library-only on a host. `common.h` includes it too, so the definitions stay single-sourced and no existing caller changes. This is the change that made the test suite above possible; the `NOTE` in `color.h` had flagged it as the blocker.
@@ -90,6 +138,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Release packaging: a root `Makefile` with `make dist` (and `make gh-release`) driving `scripts/build_release.py`, which clean-builds the full engine x board matrix in one shot and collects version-stamped `daisy-<engine>-<board>-<version>.bin` artifacts under `dist/<version>/` with `SHA256SUMS`, `MANIFEST.txt`, and `RELEASE_NOTES.md` (CHANGELOG section + flashing guide). `RELEASE_ENGINES` / `RELEASE_BOARDS` restrict the matrix to a subset (e.g. a single board or pair), `VERSION` sets the version, and `WITH_HEX=1` also emits `.hex` artifacts.
 
 ### Fixed
+
+- **The host suites did not rebuild when a header changed** (`host/Makefile`). Suites were relinked
+  only when their own `.cpp` changed, so editing `app/param_ui.h` or `app/display_adapter.h` and
+  re-running `make test` silently re-ran the *old binary* and reported a pass — a green result that
+  means nothing, with nothing about it looking wrong. Found by mutation-testing the display adapter:
+  three deliberate breaks all "passed". Now compiles per translation unit with `-MMD -MP` and includes
+  the generated dependency files, so the compiler enumerates what it actually opened.
+- **`src/engine/led.ring.cpp` used `std::round` without including `<cmath>`**, relying on the removed
+  `expose.h -> common.h -> <daisy.h>` chain and on the ARM build's forced `-include stm32h7xx.h`.
+  Invisible on target for exactly that reason; the host build has neither and caught it.
 
 - **`host/Makefile` could not build from a clean checkout.** The phony `build` target collided with the `$(BUILD)` directory target of the same name, so make resolved the compile rule's order-only prerequisite to the phony one ("Circular build <- build/test_wav dependency dropped"), skipped the `mkdir`, and the link failed with "cannot open output file". Invisible locally once `build/` exists — found by running the CI command sequence against a cleaned tree. The directory is now created by the compile recipe itself (`$(@D)`) and the phony target renamed to `compile`.
 

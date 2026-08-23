@@ -97,18 +97,34 @@ public:
     }
 
     int  page() const  { return _page; }
-    int  pages() const { return _pages; }
+    int  pages() const { return total_pages(); }
+
+    // Give the engine a page of its own at the end of the rotation, for a board whose display can
+    // show one (app/display_adapter.h draws it). Set from engine_draws<E>() - an engine that draws
+    // nothing has no page to offer.
+    //
+    // The knobs deliberately KEEP the params of the page you came from while the engine page is
+    // showing: seed_page() runs only when landing on a parameter page, so flipping to the engine view
+    // to watch what a control is doing does not take the control away. Coming back re-seeds as any
+    // page turn does.
+    void set_engine_page(bool on) { _engine_page = on; }
+    bool has_engine_page() const  { return _engine_page; }
+    bool on_engine_page() const   { return _engine_page && _page >= _pages; }
     void set_deck(DeckRef::Ref deck, IEngine& engine) { _deck = deck; seed_page(engine); }
     DeckRef::Ref deck() const { return _deck; }
 
     void set_page(int page, IEngine& engine)
     {
-        if (_pages <= 0) return;
-        while (page < 0)       page += _pages;
-        while (page >= _pages) page -= _pages;
+        const int total = total_pages();
+        if (total <= 0) return;
+        while (page < 0)      page += total;
+        while (page >= total) page -= total;
         if (page == _page) return;
         _page = page;
-        seed_page(engine);   // knobs must re-catch: they now address different params
+        // Only a PARAMETER page repoints the knobs. Landing on the engine page leaves them where they
+        // were (see set_engine_page); landing back on a parameter page re-seeds, so they must re-catch
+        // because they now address different params.
+        if (!on_engine_page()) seed_page(engine);
     }
 
     // Main loop: push caught knobs into the engine. `analog` is the board's normalized snapshot.
@@ -157,6 +173,18 @@ public:
     // An engine whose deck->value mapping changed under us (IEngine::take_param_reseed) invalidates
     // the pickup cache: the knobs now address different values and must re-catch.
     void reseed(IEngine& engine) { seed_page(engine); }
+
+    // Has every knob on the current page taken control of its param? False while any of them still has
+    // to be swept across its value first. The screen shows this per row (the '.' marker and the caret);
+    // this is the same answer as one bool, for a board with no screen to show on an LED instead - a
+    // knob that writes nothing and does not say why is indistinguishable from a broken knob.
+    // Slots with no param assigned (a partly-filled last page) do not count against it.
+    bool all_caught() const
+    {
+        for (int s = 0; s < _knobs; s++)
+            if (_slot[s].id != ParamId::Count && !_slot[s].caught) return false;
+        return true;
+    }
 
     // --- The action screen ---------------------------------------------------------------------
     // Everything an engine exposes that is NOT a knob: the play / record pads and the categorical
@@ -299,6 +327,9 @@ public:
                 const char* status = nullptr)
     {
         if (!Board::kHasScreen) return;
+        // The engine page is drawn by the display adapter, which owns the DisplayModel; this class
+        // deliberately knows nothing about one. Drawing nothing here leaves the panel to it.
+        if (on_engine_page() && !_actions) return;
         if (now_ms - _last_draw_ms < static_cast<uint32_t>(1000 / kScreenHz)) return;
         _last_draw_ms = now_ms;
 
@@ -355,6 +386,9 @@ public:
 
 private:
     static constexpr int kMaxParams = static_cast<int>(ParamId::Count);
+
+    // Parameter pages plus the engine's own page, where there is one.
+    int total_pages() const { return _pages + (_engine_page ? 1 : 0); }
 
     // Point the knobs at this page's params and drop them out of catch, seeding the crossing detector
     // with where each knob physically is right now.
@@ -601,7 +635,8 @@ private:
     ParamId      _params[kMaxParams] = {};
     int          _count              = 0;
     int          _knobs              = 4;
-    int          _pages              = 0;
+    int          _pages              = 0;   // PARAMETER pages only; see total_pages()
+    bool         _engine_page        = false;
     int          _page               = 0;
     DeckRef::Ref _deck               = DeckRef::A;
     ParamSlot    _slot[kMaxSlots];

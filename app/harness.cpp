@@ -45,6 +45,7 @@
 #include "app/system_time.h"    // SystemTime: the libDaisy-backed ITimeSource
 #include "app/harness_clock.h"   // HarnessTransport: the HAL-free tick grid over it
 #include "app/param_ui.h"
+#include "app/display_adapter.h"  // DisplayModel -> the board's indicator LEDs
 
 // SD service. Two implementations of IStreamDeck live in this repo and the engine picks which one it
 // needs: an engine that streams audio from the card (tape, radio, pstretch, softcut, bard) sets
@@ -112,6 +113,13 @@ static daisyapps::SystemTime       time_source;
 static daisyapps::HarnessTransport transport(time_source);
 using HarnessUI = daisyapps::ParamUI<daisyapps::Board>;
 static HarnessUI ui;
+
+// The engine's panel: the indicator LEDs on a board that has them, and the engine page on a board with
+// a display. Both axes are compile-time - the board's hardware, and whether THIS build's engine draws
+// at all - so a target with neither carries none of it. See app/display_adapter.h.
+using HarnessLeds = daisyapps::DisplayAdapter<daisyapps::Board,
+                                              daisyapps::engine_draws<daisyapps::ActiveEngine>()>;
+static HarnessLeds leds;
 
 #if defined(SPK_USE_STREAM)
 // Streaming build. One read-ahead / write-behind ring PER DECK - a deck is play-XOR-record, so one ring
@@ -229,6 +237,14 @@ int main(void)
     // besides its construction, and the only place the answer is available: everything downstream
     // holds an IEngine& and could not tell a play pad from a no-op.
     ui.init(engine, knobs, daisyapps::pad_mask<daisyapps::ActiveEngine>());
+    // Whether this build's engine draws its own panel, measured from the concrete type rather than
+    // taken from capabilities() - same reason as the pad mask above (app/engine_pads.h). An engine
+    // that does not draw gets the platform's page/pickup fallback on the same LEDs.
+    // On a board with a display, an engine that draws gets a page of its own at the end of the page
+    // rotation. On the Daisy Patch that is the ONLY place it can draw at all: it has no discrete LEDs,
+    // so the indicator path is a no-op there.
+    ui.set_engine_page(daisyapps::engine_draws<daisyapps::ActiveEngine>()
+                       && daisyapps::Board::kHasScreen);
 
     board.StartAudio(AudioCallback);
     board.StartMidi();
@@ -432,6 +448,17 @@ int main(void)
                           stream_live ? 'P' : '-', s_play_presses % 10);
             status_p = status;
         }
+        // One screen, two possible owners. The action list wins whenever it is open; otherwise the
+        // engine page is drawn by the adapter (which owns the DisplayModel) and every other page by
+        // the parameter UI. ParamUI::render draws nothing when the engine page is showing, so these
+        // two never fight over the panel.
         ui.render(board, engine, SPK_ENGINE_STR, transport.tempo(), now_ms, status_p);
+        if (ui.on_engine_page() && !ui.in_actions())
+            leds.render_screen(board, engine, s_deck, SPK_ENGINE_STR, now_ms);
+
+        // Indicator LEDs. Rate-limited inside tick(); on a board with none this is not compiled at
+        // all. An engine that draws gets its own panel projected; one that does not gets the page hue
+        // and the knob-pickup state, which on a screenless board is the paged UI's only feedback.
+        leds.tick(board, engine, s_deck, ui.page(), ui.pages(), ui.all_caught(), now_ms);
     }
 }

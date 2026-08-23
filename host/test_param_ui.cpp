@@ -632,4 +632,140 @@ TEST(an_uncaught_knob_is_marked_on_screen)
     CHECK(!board.drew(".pos"));
 }
 
+// --- the engine page in the rotation ------------------------------------------------------------
+//
+// On a board with a display, an engine that draws its own panel gets a page of its own at the end of
+// the rotation; the display adapter draws it. ParamUI's job is only to make room for it and to keep
+// out of the way.
+
+TEST(the_engine_page_adds_one_to_the_rotation)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos, ParamId::FluxFb, ParamId::Env, ParamId::EnvSize,
+                            ParamId::Size});      // 5 params -> 2 parameter pages
+
+    UI ui;
+    ui.init(e, 4);
+    CHECK_EQ(ui.pages(), 2);
+    CHECK(!ui.has_engine_page());
+
+    ui.set_engine_page(true);
+    CHECK(ui.has_engine_page());
+    CHECK_EQ(ui.pages(), 3);
+}
+
+TEST(the_engine_page_is_the_last_index)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos, ParamId::FluxFb, ParamId::Env, ParamId::EnvSize,
+                            ParamId::Size});
+    UI ui;
+    ui.init(e, 4);
+    ui.set_engine_page(true);
+
+    ui.set_page(0, e);
+    CHECK(!ui.on_engine_page());
+    ui.set_page(1, e);
+    CHECK(!ui.on_engine_page());
+    ui.set_page(2, e);
+    CHECK(ui.on_engine_page());
+    ui.set_page(3, e);                            // wraps back to the start
+    CHECK_EQ(ui.page(), 0);
+    CHECK(!ui.on_engine_page());
+}
+
+TEST(an_engine_page_works_even_with_no_live_params)
+{
+    FakeEngine e;
+    e.param_mask = 0;                             // nothing to page through
+    UI ui;
+    ui.init(e, 4);
+    ui.set_engine_page(true);
+
+    CHECK_EQ(ui.pages(), 1);
+    CHECK(ui.on_engine_page());                   // the engine page is the only page
+    ui.set_page(1, e);                            // must not divide by zero or run away
+    CHECK_EQ(ui.page(), 0);
+}
+
+// Flipping to the engine view to watch what a control is doing must not take the control away.
+TEST(the_knobs_keep_their_params_on_the_engine_page)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    e.set_value(ParamId::Pos, DeckRef::A, 0.50f);
+
+    UI ui;
+    ui.init(e, 4);
+    ui.set_engine_page(true);
+    hold(ui, e, controls_of({0.50f, 0, 0, 0}), 2);   // catch it on the parameter page
+    e.clear_calls();
+
+    ui.set_page(1, e);                               // -> the engine page
+    CHECK(ui.on_engine_page());
+    hold(ui, e, controls_of({0.70f, 0, 0, 0}));      // the knob still owns Pos
+    CHECK_EQ(e.writes.size(), 1u);
+    CHECK_NEAR(e.param(ParamId::Pos, DeckRef::A), 0.70f, 1e-6);
+}
+
+// ...but coming back to a parameter page re-seeds, exactly as any other page turn does.
+TEST(returning_from_the_engine_page_re_seeds_the_knobs)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos, ParamId::FluxFb, ParamId::Env, ParamId::EnvSize,
+                            ParamId::Size});         // 2 parameter pages
+    e.set_value(ParamId::Size, DeckRef::A, 0.9f);    // page 1's only param
+
+    UI ui;
+    ui.init(e, 4);
+    ui.set_engine_page(true);
+    hold(ui, e, controls_of({0.3f, 0.3f, 0.3f, 0.3f}), 3);   // catch page 0
+    e.clear_calls();
+
+    ui.set_page(2, e);                               // engine page
+    ui.set_page(1, e);                               // back to parameter page 1
+    CHECK(!ui.on_engine_page());
+    hold(ui, e, controls_of({0.3f, 0.3f, 0.3f, 0.3f}), 3);
+    CHECK_EQ(e.writes.size(), 0u);                   // must NOT have jumped Size to 0.3
+    CHECK_NEAR(e.param(ParamId::Size, DeckRef::A), 0.9f, 1e-6);
+}
+
+// Two owners, one panel: ParamUI must draw nothing while the engine page is showing, or it would
+// fight the adapter for the screen.
+TEST(param_ui_draws_nothing_on_the_engine_page)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    UI ui;
+    ui.init(e, 4);
+    ui.set_engine_page(true);
+
+    FakeBoard board;
+    ui.render(board, e, "chorus", 120.f, 1000);
+    CHECK_EQ(board.updates, 1);                      // parameter page 0 drew
+
+    ui.set_page(1, e);                               // -> engine page
+    ui.render(board, e, "chorus", 120.f, 2000);
+    CHECK_EQ(board.updates, 1);                      // ...and nothing more
+}
+
+// The action list is reachable from anywhere, including the engine page, and wins the panel while it
+// is open - otherwise the engine page would strand the only route to the pads on a Daisy Patch.
+TEST(the_action_screen_still_draws_over_the_engine_page)
+{
+    FakeEngine e;
+    e.param_mask = mask_of({ParamId::Pos});
+    UI ui;
+    ui.init(e, 4, PadPlay);
+    ui.set_engine_page(true);
+    ui.set_page(1, e);
+    CHECK(ui.on_engine_page());
+
+    ui.open_actions(e, 1000);
+    FakeBoard board;
+    ui.render(board, e, "chorus", 120.f, 2000);
+    CHECK(board.drew("play"));
+    CHECK_EQ(board.updates, 1);
+}
+
 int main() { return daisyapps::test::run_all(); }
