@@ -48,7 +48,12 @@ build-*/
 
 # Cross-compiled engine deps - reproduced on demand by scripts/fetch_{csound,chuck}.sh
 # (source trees + libcsound.a/libchuck.a), so not vendored. See pod/README.md.
-thirdparty/
+#
+# Anchored to the repo root ON PURPOSE. An unanchored `thirdparty/` also matches the per-engine
+# vendored trees (src/engine/{reso,mosc,graincloud}/thirdparty, src/engine/common/thirdparty), which
+# have no fetch script and MUST be committed - a fresh checkout cannot build reso/mosc/graincloud
+# without them.
+/thirdparty/
 
 # CMake generated files
 CMakeFiles/
