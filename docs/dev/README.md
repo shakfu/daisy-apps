@@ -28,7 +28,7 @@ copy.
 | `docs/dev/terminal-impl.md` | the serial command channel's implementation | `src/abi_tag.h` |
 | `docs/dev/terminal-dispatch.md` | `describe` and the liveness masks (`live_params` / `live_configs`) | most engine headers |
 | `docs/dev/terminal-target-b.md` | declared-rather-than-parsed engine state (`engine_queries`) | `src/engine/iengine.h`, `terminal_io.h`, `tape_engine.h` |
-| `docs/dev/terminal-osc.md` | the OSC form of `describe` and where `param_label` is load-bearing | `src/engine/iengine.h`, `terminal_io.h`, several engines |
+| `docs/dev/terminal-osc.md` | the OSC form of `describe` and where `param_label` is structural | `src/engine/iengine.h`, `terminal_io.h`, several engines |
 | `docs/dev/indicator-grammar.md` | the LED/indicator vocabulary | `src/engine/indicators.h`, `tape_engine.cpp` |
 | `docs/dev/indicator-comparison.md` | how engines' hand-rolled indicator code compared before it was unified | `src/engine/indicators.h`, `reverb`, `reso`, `pstretch` |
 | `docs/dev/csound-impl.md` | the Csound engine's roadmap and build recipe | `src/engine/csound/*` |

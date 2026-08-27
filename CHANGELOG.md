@@ -8,92 +8,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **The header shows the engine's transport state** — `REC` / `ARM` / `QUE` / `PLY`, read from
-  `IEngine::play_leds()` and taking priority over the tempo. Engines that report nothing fall through
-  silently (the default `PlayLeds` is all-false). Added during hardware bring-up because `granular`
-  was undiagnosable without it: silent by design, drawing no panel, on a board with no LEDs — so
-  "nothing happens" could equally be a pad that never reached the engine, a deck armed and waiting on
-  a start condition, or a recording of silence. Three different faults, previously indistinguishable.
-- **The Aux selector follows knob 1** while the encoder is held, rather than the encoder's rotation.
-  That is upstream's Alt+PITCH gesture and what the rest of the repo already documents
-  (`pod/README.md`: "turn knob 1 while holding"); `app/harness.cpp` was the outlier. Knob 1 is lent
-  for the duration (`ParamUI::set_knob_suspended`) so it does not also write the param it normally
-  addresses, and it re-catches on release — otherwise letting go would drag that param to wherever the
-  selector ended up. The encoder nudge is kept as a fine adjustment.
-- **[`docs/dev/hardware-bringup.md`](docs/dev/hardware-bringup.md)** — the ordered bench plan for
-  validating `app/` on a Daisy Patch, and the running record of what has actually been observed on a
-  device: 11 of 21 builds confirmed, `granular` parked with its findings written down, 9 untested.
+- **The header shows the engine's transport state** — `REC` / `ARM` / `QUE` / `PLY`, read from `IEngine::play_leds()` and taking priority over the tempo. Engines that report nothing fall through silently (the default `PlayLeds` is all-false). Added during hardware bring-up because `granular` was undiagnosable without it: silent by design, drawing no panel, on a board with no LEDs — so "nothing happens" could equally be a pad that never reached the engine, a deck armed and waiting on a start condition, or a recording of silence. Three different faults, previously indistinguishable.
 
-- **`IEngine::config(ConfigId, DeckRef::Ref)`** — the categorical read-back the contract never had,
-  and the counterpart to `set_config`. Without it the platform's only honest source for a switch
-  position is what it last *wrote*, so before the user touches a switch its position is unknown:
-  `app/param_ui.h` prints `-/3`, because a plausible number is worse than a visible blank. The cost
-  was that a `reverb` booted showing `mode -/3` with no way to learn whether you were hearing
-  Dattorro, Zita or Greyhole except by changing it — losing the one you booted into.
-  - The default of `-1` ("not reported") is exactly the previous behaviour, so an engine that says
-    nothing is unaffected and no port has to change; the platform keeps its write-cache fallback for
-    those. An engine that answers gets an honest display from boot, and its switch cycles from where
-    it actually is.
-  - **This fixes behaviour, not just display.** `radio`, `shuttle`, `softcut` and `tape` boot at
-    `Route::DoubleMono`, which is selector position 2 — so the old "first click selects position 1"
-    rule silently moved them to Stereo the first time that row was used.
-  - Implemented for eleven engines: `delay`, `qdelay`, `reverb`, `edrums`, `glitch`, `radio`,
-    `shuttle`, `softcut`, `tape`, `reso`, `mosc`. `bard`, `pstretch`, `granular` and `graincloud`
-    keep the fallback — their switch state is held further inside the engine and reporting it is not
-    a three-line change.
-- **`route_to_config()` / `config_to_route()`** in `engine/mode.h`. The selector index
-  `ConfigId::Route` carries is *not* the `Route` enum's own numbering (the enum starts at 1, in a
-  different order), and every engine hand-rolls the int→`Route` direction inside its own
-  `set_config`. The inverse now exists in one place, which is what the new `config()` overrides answer
-  with — and it is covered by a round-trip test, because a mismatch would report the wrong topology.
+- **The Aux selector follows knob 1** while the encoder is held, rather than the encoder's rotation. That is upstream's Alt+PITCH gesture and what the rest of the repo already documents (`pod/README.md`: "turn knob 1 while holding"); `app/harness.cpp` was the outlier. Knob 1 is lent for the duration (`ParamUI::set_knob_suspended`) so it does not also write the param it normally addresses, and it re-catches on release — otherwise letting go would drag that param to wherever the selector ended up. The encoder nudge is kept as a fine adjustment.
 
-- **Engine panels reach the board's LEDs** (`app/display_adapter.h`). `IEngine::render(DisplayModel&)`,
-  the `engine/indicators.h` palette/motion/ring vocabulary and `LEDRing` had never been called by
-  anything: twelve files in `src/engine/` implemented a panel that never lit. On a Pod — the only
-  hardware-validated target — that meant an engine was a two-knob black box with two dark LEDs. The
-  adapter projects a `DisplayModel` onto whatever indicators a board actually has: indicator 0 takes
-  the deck's transport state (already colour-coded by `transport_view()` — red recording, green
-  forward, cyan reverse), indicator 1 takes the deck's 32-pixel ring collapsed to one lamp. It is a
-  projection and not a blit, deliberately: one LED cannot represent thirty-two, and the collapse
-  policy is gathered into `ring_summary()` so it is in one place and can be argued with once someone
-  has looked at real hardware.
-  - An engine that draws **nothing** — most of them — gets a platform fallback instead of a dark
-    panel: the parameter page as a hue, and knob pickup state (red until every visible knob has been
-    swept across its value, green after). On a screenless board that is the only feedback the paged UI
-    has ever had, and its own comments say the page and the catch state are exactly what a player
-    cannot otherwise see.
-  - Whether an engine draws is **measured, not declared** (`engine_draws<E>()` in `app/engine_pads.h`),
-    for the reason that file already exists: `capabilities()`'s `CapOwnDisplay` is a hand-maintained
-    claim, and such claims have drifted here before.
-  - **The Daisy Patch gets an engine page** instead, since it has no discrete LEDs at all and the OLED
-    was the only route. `ParamUI` makes room for one extra page at the end of the rotation and draws
-    nothing while it shows; the adapter draws it. A 1-bit panel cannot paint colour — which is where
-    the transport state lives — but it can print the word: `transport_word()` inverts
-    `transport_view()`'s palette mapping, so the page reads `play:rec` / `play:fwd` / `play:rev`.
-    Rings become 32-cell bar strips (full bar / stub / nothing, enough to read a level arc, a playhead
-    or a selector) and lit indicators become words — more information than two RGB lamps, not less.
-    The knobs keep the params of the page you came from, so flipping over to watch a control does not
-    take the control away.
-  - Costs nothing where there is nothing to do: both axes are compile-time
-    (`DisplayAdapter<Board, Draws>`), so the ~2.3 KB `DisplayModel` is absent both for a board with
-    neither indicators nor a screen and for an engine that draws nothing. On the Patch, `granular`,
-    `graincloud` and `gigaverb` pay 8 bytes of `.bss` rather than 2304.
-  - Worth recording, because the review got it wrong: it reported "eleven engines implement
-    `render(DisplayModel&)`" from a file-level grep, which misses engines inheriting it from the Faust
-    bases. Compiling `engine_draws<ActiveEngine>()` for every engine and checking the resulting `.bss`
-    gives **17 of 20** — everything except `granular`, `graincloud` and `gigaverb`.
-- **`src/board/board_contract.h`** — a `static_assert` check that a board driver satisfies the surface
-  `board.h` documents, instantiated against whichever target was selected. The surface is duck-typed
-  and only one driver compiles per build, so a member that goes missing is invisible until someone
-  selects that target — which is how `patch_init_board.h` carried a call to libDaisy's removed
-  `dsy_gpio_write` across an API change unnoticed. One assert per member, each naming the method and
-  its expected shape, plus sanity on the values (a control count larger than the `Controls` snapshot
-  it fills would have `Poll()` overrun it).
-- **A fifth host suite, `host/test_display_adapter.cpp`** (22 cases), over the projection: colour and
-  brightness scaling, the ring collapse and its monotonicity, the mono-LED brightness floor, deck
-  focus, the platform fallback, rate limiting, and the board shapes that must compile away. Every
-  design decision in the adapter was mutation-checked — each deliberate break is caught by a named
-  test.
+- **[`docs/dev/hardware-bringup.md`](docs/dev/hardware-bringup.md)** — the ordered bench plan for validating `app/` on a Daisy Patch, and the running record of what has actually been observed on a device: 11 of 21 builds confirmed, `granular` parked with its findings written down, 9 untested.
+
+- **`IEngine::config(ConfigId, DeckRef::Ref)`** — the categorical read-back the contract never had, and the counterpart to `set_config`. Without it the platform's only honest source for a switch position is what it last *wrote*, so before the user touches a switch its position is unknown: `app/param_ui.h` prints `-/3`, because a plausible number is worse than a visible blank. The cost was that a `reverb` booted showing `mode -/3` with no way to learn whether you were hearing Dattorro, Zita or Greyhole except by changing it — losing the one you booted into.
+
+  - The default of `-1` ("not reported") is exactly the previous behaviour, so an engine that says nothing is unaffected and no port has to change; the platform keeps its write-cache fallback for those. An engine that answers gets an honest display from boot, and its switch cycles from where it actually is.
+
+  - **This fixes behaviour, not just display.** `radio`, `shuttle`, `softcut` and `tape` boot at `Route::DoubleMono`, which is selector position 2 — so the old "first click selects position 1" rule silently moved them to Stereo the first time that row was used.
+
+  - Implemented for eleven engines: `delay`, `qdelay`, `reverb`, `edrums`, `glitch`, `radio`, `shuttle`, `softcut`, `tape`, `reso`, `mosc`. `bard`, `pstretch`, `granular` and `graincloud` keep the fallback — their switch state is held further inside the engine and reporting it is not a three-line change.
+
+- **`route_to_config()` / `config_to_route()`** in `engine/mode.h`. The selector index `ConfigId::Route` carries is *not* the `Route` enum's own numbering (the enum starts at 1, in a different order), and every engine hand-rolls the int→`Route` direction inside its own `set_config`. The inverse now exists in one place, which is what the new `config()` overrides answer with — and it is covered by a round-trip test, because a mismatch would report the wrong topology.
+
+- **Engine panels reach the board's LEDs** (`app/display_adapter.h`). `IEngine::render(DisplayModel&)`, the `engine/indicators.h` palette/motion/ring vocabulary and `LEDRing` had never been called by anything: twelve files in `src/engine/` implemented a panel that never lit. On a Pod — the only hardware-validated target — that meant an engine was a two-knob black box with two dark LEDs. The adapter projects a `DisplayModel` onto whatever indicators a board actually has: indicator 0 takes the deck's transport state (already colour-coded by `transport_view()` — red recording, green forward, cyan reverse), indicator 1 takes the deck's 32-pixel ring collapsed to one lamp. It is a projection and not a blit, deliberately: one LED cannot represent thirty-two, and the collapse policy is gathered into `ring_summary()` so it is in one place and can be argued with once someone has looked at real hardware.
+
+  - An engine that draws **nothing** — most of them — gets a platform fallback instead of a dark panel: the parameter page as a hue, and knob pickup state (red until every visible knob has been swept across its value, green after). On a screenless board that is the only feedback the paged UI has ever had, and its own comments say the page and the catch state are exactly what a player cannot otherwise see.
+
+  - Whether an engine draws is **measured, not declared** (`engine_draws<E>()` in `app/engine_pads.h`), for the reason that file already exists: `capabilities()`'s `CapOwnDisplay` is a hand-maintained claim, and such claims have drifted here before.
+
+  - **The Daisy Patch gets an engine page** instead, since it has no discrete LEDs at all and the OLED was the only route. `ParamUI` makes room for one extra page at the end of the rotation and draws nothing while it shows; the adapter draws it. A 1-bit panel cannot paint colour — which is where the transport state lives — but it can print the word: `transport_word()` inverts `transport_view()`'s palette mapping, so the page reads `play:rec` / `play:fwd` / `play:rev`. Rings become 32-cell bar strips (full bar / stub / nothing, enough to read a level arc, a playhead or a selector) and lit indicators become words — more information than two RGB lamps, not less. The knobs keep the params of the page you came from, so flipping over to watch a control does not take the control away.
+
+  - Costs nothing where there is nothing to do: both axes are compile-time (`DisplayAdapter<Board, Draws>`), so the ~2.3 KB `DisplayModel` is absent both for a board with neither indicators nor a screen and for an engine that draws nothing. On the Patch, `granular`, `graincloud` and `gigaverb` pay 8 bytes of `.bss` rather than 2304.
+
+  - Worth recording, because the review got it wrong: it reported "eleven engines implement `render(DisplayModel&)`" from a file-level grep, which misses engines inheriting it from the Faust bases. Compiling `engine_draws<ActiveEngine>()` for every engine and checking the resulting `.bss` gives **17 of 20** — everything except `granular`, `graincloud` and `gigaverb`.
+
+- **`src/board/board_contract.h`** — a `static_assert` check that a board driver satisfies the surface `board.h` documents, instantiated against whichever target was selected. The surface is duck-typed and only one driver compiles per build, so a member that goes missing is invisible until someone selects that target — which is how `patch_init_board.h` carried a call to libDaisy's removed `dsy_gpio_write` across an API change unnoticed. One assert per member, each naming the method and its expected shape, plus sanity on the values (a control count larger than the `Controls` snapshot it fills would have `Poll()` overrun it).
+
+- **A fifth host suite, `host/test_display_adapter.cpp`** (22 cases), over the projection: colour and brightness scaling, the ring collapse and its monotonicity, the mono-LED brightness floor, deck focus, the platform fallback, rate limiting, and the board shapes that must compile away. Every design decision in the adapter was mutation-checked — each deliberate break is caught by a named test.
 
 - **Host test suite and `make test`** (`host/`). Four suites — 86 cases — over the platform layer's pure logic: the lock-free `SpscRing` and its `PlayStream`/`RecordStream` pumps, `WavStreamReader`'s chunk walk and the writer round-trip, `HarnessTransport`'s 48-PPQN tick grid and external-sync state machine, and `ParamUI`'s value pickup, page paging and generated action rows. Runs under AddressSanitizer + UndefinedBehaviorSanitizer by default (`make test SANITIZE=` to disable). The harness is a ~50-line header (`host/check.h`) with recording fakes for the Board and `IEngine` surfaces — no vendored framework, matching the stdlib-only convention in `scripts/`.
 
@@ -178,33 +123,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **`granular` / `graincloud` could not record at all.** A deck constructs at `Mode::None`, and
-  `_set_buf_armed()` has an empty `case Mode::None: break;` — so `rec` armed a deck that could never
-  start, and both engines have no audio until something is recorded. Inert from boot with nothing
-  indicating why. Fixed by implementing `IEngine::config()` for both (reading Route / ModType / Mode
-  back from Core, which needed `const` overloads of `Core::deck()` and `Core::mod()`), and by teaching
-  the action screen's first-visit cursor to land on a switch the engine reports as **unset**. That
-  refines the "never land on a config" rule rather than contradicting it: clicking a switch with no
-  position cannot lose anything, whereas clicking one that has a position would change it blind. An
-  engine that reports *nothing* is still left alone, since there `-1` means "cannot see" rather than
-  "unset".
-- **`granular` / `graincloud` misreported `Mix` and `Feedback` as 0.** `init()` seeds 8 of 19 live
-  params; the deck's real defaults are `_in_out_mix = 0.5` and `_feedback = kDefaultFeedback` (0.95).
-  This was not cosmetic: soft-takeover catches a knob **at the reported value**, so the first touch of
-  the mix knob wrote 0 and killed the deck's output. Seeded from the deck itself via two new const
-  getters rather than copied literals, so there is one source of truth. Found on hardware; the third
-  defect in a row caused by `param()` not reflecting engine state, which in a system with pickup makes
-  a read-back bug into a write bug.
+- **`granular` / `graincloud` could not record at all.** A deck constructs at `Mode::None`, and `_set_buf_armed()` has an empty `case Mode::None: break;` — so `rec` armed a deck that could never start, and both engines have no audio until something is recorded. Inert from boot with nothing indicating why. Fixed by implementing `IEngine::config()` for both (reading Route / ModType / Mode back from Core, which needed `const` overloads of `Core::deck()` and `Core::mod()`), and by teaching the action screen's first-visit cursor to land on a switch the engine reports as **unset**. That refines the "never land on a config" rule rather than contradicting it: clicking a switch with no position cannot lose anything, whereas clicking one that has a position would change it blind. An engine that reports *nothing* is still left alone, since there `-1` means "cannot see" rather than "unset".
 
-- **The host suites did not rebuild when a header changed** (`host/Makefile`). Suites were relinked
-  only when their own `.cpp` changed, so editing `app/param_ui.h` or `app/display_adapter.h` and
-  re-running `make test` silently re-ran the *old binary* and reported a pass — a green result that
-  means nothing, with nothing about it looking wrong. Found by mutation-testing the display adapter:
-  three deliberate breaks all "passed". Now compiles per translation unit with `-MMD -MP` and includes
-  the generated dependency files, so the compiler enumerates what it actually opened.
-- **`src/engine/led.ring.cpp` used `std::round` without including `<cmath>`**, relying on the removed
-  `expose.h -> common.h -> <daisy.h>` chain and on the ARM build's forced `-include stm32h7xx.h`.
-  Invisible on target for exactly that reason; the host build has neither and caught it.
+- **`granular` / `graincloud` misreported `Mix` and `Feedback` as 0.** `init()` seeds 8 of 19 live params; the deck's real defaults are `_in_out_mix = 0.5` and `_feedback = kDefaultFeedback` (0.95). This was not cosmetic: soft-takeover catches a knob **at the reported value**, so the first touch of the mix knob wrote 0 and killed the deck's output. Seeded from the deck itself via two new const getters rather than copied literals, so there is one source of truth. Found on hardware; the third defect in a row caused by `param()` not reflecting engine state, which in a system with pickup makes a read-back bug into a write bug.
+
+- **The host suites did not rebuild when a header changed** (`host/Makefile`). Suites were relinked only when their own `.cpp` changed, so editing `app/param_ui.h` or `app/display_adapter.h` and re-running `make test` silently re-ran the *old binary* and reported a pass — a green result that means nothing, with nothing about it looking wrong. Found by mutation-testing the display adapter: three deliberate breaks all "passed". Now compiles per translation unit with `-MMD -MP` and includes the generated dependency files, so the compiler enumerates what it actually opened.
+
+- **`src/engine/led.ring.cpp` used `std::round` without including `<cmath>`**, relying on the removed `expose.h -> common.h -> <daisy.h>` chain and on the ARM build's forced `-include stm32h7xx.h`. Invisible on target for exactly that reason; the host build has neither and caught it.
 
 - **`host/Makefile` could not build from a clean checkout.** The phony `build` target collided with the `$(BUILD)` directory target of the same name, so make resolved the compile rule's order-only prerequisite to the phony one ("Circular build <- build/test_wav dependency dropped"), skipped the `mkdir`, and the link failed with "cannot open output file". Invisible locally once `build/` exists — found by running the CI command sequence against a cleaned tree. The directory is now created by the compile recipe itself (`$(@D)`) and the phony target renamed to `compile`.
 
