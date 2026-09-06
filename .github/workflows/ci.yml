@@ -35,7 +35,7 @@ jobs:
     name: host tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `make test` runs scripts/check_docs.sh and then the four host suites under ASan + UBSan.
       # g++ and make are already on the runner image; the suite has no other dependency, which is the
@@ -62,7 +62,7 @@ jobs:
         board: [pod, patch_init, patch]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Pinned to the 10.x generation on purpose. The Daisy toolchain documentation targets
       # gcc-arm-none-eabi 10-2020-q4-major, this repo is developed against exactly that, and the
