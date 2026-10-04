@@ -357,4 +357,73 @@ TEST(transport_interpolates_sub_ticks_between_pulses)
     CHECK(log.count_common() <= 4);
 }
 
+// A clock slightly slower than the measured interval used to let the interpolator wrap onto the next
+// beat's downbeat before the edge emitted it again: 40 common / 16 quarter ticks per 8 beats at 1 PPQ.
+TEST(transport_emits_each_grid_position_once_under_a_late_clock)
+{
+    FakeTime clk;
+    HarnessTransport t(clk);
+    TickLog log;
+    log.attach(t);
+    clk.set(1000);
+
+    t.on_external_clock_edge();
+    clk.advance(500);
+    t.on_external_clock_edge();               // acquires at 120 BPM
+    log.clear();
+
+    for (int beat = 0; beat < 8; beat++) {
+        run_for(t, clk, 501);                 // each pulse 1 ms later than predicted
+        t.on_external_clock_edge();
+    }
+    CHECK_EQ(log.count_common(), 32);         // 8 beats x 4 sixteenths
+    CHECK_EQ(log.count_quarter(), 8);
+}
+
+// The same, at 4 PPQ: a pulse per sixteenth, so each pulse owns exactly one common tick.
+TEST(transport_emits_each_grid_position_once_at_4_ppq)
+{
+    FakeTime clk;
+    HarnessTransport t(clk);
+    t.set_ext_ppq(4);
+    TickLog log;
+    log.attach(t);
+    clk.set(1000);
+
+    t.on_external_clock_edge();
+    clk.advance(125);
+    t.on_external_clock_edge();
+    log.clear();
+
+    for (int p = 0; p < 32; p++) {
+        run_for(t, clk, 126);
+        t.on_external_clock_edge();
+    }
+    CHECK_EQ(log.count_common(), 32);
+    CHECK_EQ(log.count_quarter(), 8);
+}
+
+// A clock speeding up arrives before the interpolator finishes the pulse; the missing ticks are
+// emitted at the edge rather than dropped, so a sequencer still advances four steps per quarter.
+TEST(transport_does_not_drop_ticks_under_an_early_clock)
+{
+    FakeTime clk;
+    HarnessTransport t(clk);
+    TickLog log;
+    log.attach(t);
+    clk.set(1000);
+
+    t.on_external_clock_edge();
+    clk.advance(500);
+    t.on_external_clock_edge();
+    log.clear();
+
+    for (int beat = 0; beat < 8; beat++) {
+        run_for(t, clk, 400);                 // each pulse well ahead of the 500 ms prediction
+        t.on_external_clock_edge();
+    }
+    CHECK_EQ(log.count_common(), 32);
+    CHECK_EQ(log.count_quarter(), 8);
+}
+
 int main() { return daisyapps::test::run_all(); }

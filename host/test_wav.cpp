@@ -9,6 +9,7 @@
 #include "check.h"
 
 #include "memory/byte_file.h"
+#include "memory/raw_stream.h"
 #include "memory/wav.h"
 #include "memory/wav_stream.h"
 
@@ -49,6 +50,7 @@ public:
     }
 
     const std::vector<uint8_t>& bytes() const { return _d; }
+    uint32_t size() const { return static_cast<uint32_t>(_d.size()); }
 
 private:
     std::vector<uint8_t> _d;
@@ -137,7 +139,7 @@ TEST(reader_accepts_a_minimal_native_file)
     MemFile f(riff({chunk("fmt ", native_fmt()), chunk("data", audio)}));
 
     WavStreamReader r;
-    CHECK(r.begin(&f));
+    CHECK(r.begin(&f, f.size()));
     CHECK_EQ(r.data_bytes(), 64u);
     CHECK_EQ(r.body_remaining(), 64u);
     CHECK(!r.eof());
@@ -162,7 +164,7 @@ TEST(reader_skips_metadata_chunks_before_data)
     }));
 
     WavStreamReader r;
-    CHECK(r.begin(&f));
+    CHECK(r.begin(&f, f.size()));
     CHECK_EQ(r.data_bytes(), 32u);
 
     std::vector<uint8_t> out(32);
@@ -177,7 +179,7 @@ TEST(reader_stops_at_data_size_and_ignores_trailing_chunks)
     MemFile f(riff({chunk("fmt ", native_fmt()), chunk("data", audio), chunk("cue ", ramp(28))}));
 
     WavStreamReader r;
-    CHECK(r.begin(&f));
+    CHECK(r.begin(&f, f.size()));
     std::vector<uint8_t> out(64);
     CHECK_EQ(r.read(out.data(), 64), 16u);   // clipped to the data chunk, not the file
     CHECK(r.eof());
@@ -189,7 +191,7 @@ TEST(reader_rewinds_to_the_data_chunk_for_looping)
     MemFile f(riff({chunk("LIST", ramp(20)), chunk("fmt ", native_fmt()), chunk("data", audio)}));
 
     WavStreamReader r;
-    CHECK(r.begin(&f));
+    CHECK(r.begin(&f, f.size()));
     std::vector<uint8_t> out(16);
     CHECK_EQ(r.read(out.data(), 16), 16u);
     CHECK(r.eof());
@@ -215,7 +217,7 @@ TEST(reader_resolves_wave_format_extensible)
 
     MemFile f(riff({chunk("fmt ", ext), chunk("data", ramp(8))}));
     WavStreamReader r;
-    CHECK(r.begin(&f));
+    CHECK(r.begin(&f, f.size()));
     CHECK_EQ(r.data_bytes(), 8u);
 }
 
@@ -231,7 +233,7 @@ TEST(reader_rejects_wrong_channel_count)
                                            WavStreamReader::kPlaybackSampleRate, kWavBitsPerSample)),
                     chunk("data", ramp(8))}));
     WavStreamReader r;
-    CHECK(!r.begin(&f));
+    CHECK(!r.begin(&f, f.size()));
 }
 
 TEST(reader_rejects_wrong_sample_rate)
@@ -239,7 +241,7 @@ TEST(reader_rejects_wrong_sample_rate)
     MemFile f(riff({chunk("fmt ", fmt_body(kWavAudioFormat, 1, 44100, kWavBitsPerSample)),
                     chunk("data", ramp(8))}));
     WavStreamReader r;
-    CHECK(!r.begin(&f));
+    CHECK(!r.begin(&f, f.size()));
 }
 
 TEST(reader_rejects_wrong_bit_depth)
@@ -249,35 +251,35 @@ TEST(reader_rejects_wrong_bit_depth)
                                            WavStreamReader::kPlaybackSampleRate, wrong_bits)),
                     chunk("data", ramp(8))}));
     WavStreamReader r;
-    CHECK(!r.begin(&f));
+    CHECK(!r.begin(&f, f.size()));
 }
 
 TEST(reader_rejects_data_before_fmt)
 {
     MemFile f(riff({chunk("data", ramp(8)), chunk("fmt ", native_fmt())}));
     WavStreamReader r;
-    CHECK(!r.begin(&f));   // `fmt ` must precede `data`; nothing to validate against otherwise
+    CHECK(!r.begin(&f, f.size()));   // `fmt ` must precede `data`; nothing to validate against otherwise
 }
 
 TEST(reader_rejects_a_short_fmt_chunk)
 {
     MemFile f(riff({chunk("fmt ", ramp(8)), chunk("data", ramp(8))}));   // WAVEFORMAT is >= 16 bytes
     WavStreamReader r;
-    CHECK(!r.begin(&f));
+    CHECK(!r.begin(&f, f.size()));
 }
 
 TEST(reader_rejects_a_non_riff_file)
 {
     MemFile f(std::vector<uint8_t>{'N', 'O', 'P', 'E', 0, 0, 0, 0, 'W', 'A', 'V', 'E'});
     WavStreamReader r;
-    CHECK(!r.begin(&f));
+    CHECK(!r.begin(&f, f.size()));
 }
 
 TEST(reader_rejects_a_file_too_short_to_hold_a_header)
 {
     MemFile f(std::vector<uint8_t>{'R', 'I', 'F', 'F'});
     WavStreamReader r;
-    CHECK(!r.begin(&f));
+    CHECK(!r.begin(&f, f.size()));
 }
 
 // A file whose chunk list runs off the end before `data` must fail rather than walk past it. Under
@@ -288,15 +290,55 @@ TEST(reader_rejects_a_truncated_file_without_over_reading)
     bytes.resize(bytes.size() - 40);       // chop into the data body... still fine (size is declared)
     MemFile f(bytes);
     WavStreamReader r;
-    CHECK(r.begin(&f));                    // header intact: the reader trusts DataSize
+    CHECK(r.begin(&f, f.size()));          // header intact; DataSize is clamped to what is present
+    CHECK_EQ(r.data_bytes(), 24u);         // 64 declared, 40 chopped
     std::vector<uint8_t> out(64);
-    CHECK(r.read(out.data(), 64) < 64u);   // ...but the actual read comes up short, safely
+    CHECK_EQ(r.read(out.data(), 64), 24u);
+    CHECK(r.eof());                        // ends the stream rather than retrying forever
 
     auto cut = riff({chunk("fmt ", native_fmt())});
     cut.resize(cut.size() - 6);            // truncate mid-fmt: no `data` will ever be found
     MemFile g(cut);
     WavStreamReader s;
-    CHECK(!s.begin(&g));
+    CHECK(!s.begin(&g, g.size()));
+}
+
+// Streaming writers emit DataSize = 0xFFFFFFFF ("unknown length"). It must clamp to the file, not wrap.
+TEST(reader_clamps_an_unknown_length_data_chunk)
+{
+    auto bytes = riff({chunk("fmt ", native_fmt()), chunk("data", ramp(64))});
+    std::memcpy(bytes.data() + bytes.size() - 64 - 4, "\xff\xff\xff\xff", 4);
+    MemFile f(bytes);
+    WavStreamReader r;
+    CHECK(r.begin(&f, f.size()));
+    CHECK_EQ(r.data_bytes(), 64u);
+}
+
+// A body that is not a whole number of frames would put a partial frame in the ring on every loop.
+TEST(reader_floors_the_body_to_whole_frames)
+{
+    const uint32_t frame = kWavBitsPerSample / 8;
+    auto bytes = riff({chunk("fmt ", native_fmt()), chunk("data", ramp(4 * frame + 1))});
+    MemFile f(bytes);
+    WavStreamReader r;
+    CHECK(r.begin(&f, f.size()));
+    CHECK_EQ(r.data_bytes(), 4 * frame);
+}
+
+// A read error (or a file shorter than measured) returns 0 bytes; the stream must end, not stall.
+TEST(reader_ends_the_stream_on_a_zero_byte_read)
+{
+    auto bytes = riff({chunk("fmt ", native_fmt()), chunk("data", ramp(64))});
+    std::memcpy(bytes.data() + bytes.size() - 64 - 4, "\xa4\x00\x00\x00", 4);   // declare 164
+    MemFile f(bytes);
+    WavStreamReader r;
+    CHECK(r.begin(&f, f.size() + 100));    // size and header both claim 100 bytes the file lacks
+    CHECK_EQ(r.data_bytes(), 164u);
+    std::vector<uint8_t> out(256);
+    CHECK_EQ(r.read(out.data(), 256), 64u);
+    CHECK(!r.eof());
+    CHECK_EQ(r.read(out.data(), 256), 0u);
+    CHECK(r.eof());
 }
 
 // A chunk whose declared size is absurd must not send the walk into an infinite or wrapping loop.
@@ -312,7 +354,23 @@ TEST(reader_rejects_a_chunk_with_an_overflowing_size)
 
     MemFile mf(f);
     WavStreamReader r;
-    CHECK(!r.begin(&mf));                  // terminates, and says no
+    CHECK(!r.begin(&mf, mf.size()));                  // terminates, and says no
+}
+
+// --- RawStreamReader::begin_wav ------------------------------------------------------------------
+
+// `body + DataSize` once wrapped in uint32 for a 0xFFFFFFFF DataSize, so the clamp never fired and the
+// radio/bard bank index got a ~2^31-frame length.
+TEST(raw_wav_clamps_an_unknown_length_data_chunk)
+{
+    auto bytes = riff({chunk("fmt ", fmt_body(1, 1, 44100, 16)), chunk("data", ramp(1000))});
+    std::memcpy(bytes.data() + bytes.size() - 1000 - 4, "\xff\xff\xff\xff", 4);
+    MemFile f(bytes);
+    RawStreamReader r;
+    uint32_t rate = 0;
+    CHECK(r.begin_wav(&f, f.size(), rate));
+    CHECK_EQ(r.frames(), 500u);
+    CHECK_EQ(rate, 44100u);
 }
 
 // --- WavStreamWriter -----------------------------------------------------------------------------
@@ -334,10 +392,36 @@ TEST(writer_round_trips_through_the_reader)
     // The file the writer produced must be one the reader accepts, byte for byte.
     MemFile back(f.bytes());
     WavStreamReader r;
-    CHECK(r.begin(&back));
+    CHECK(r.begin(&back, back.size()));
     CHECK_EQ(r.data_bytes(), 128u);
     std::vector<uint8_t> out(128);
     CHECK_EQ(r.read(out.data(), 128), 128u);
+    CHECK_EQ(std::memcmp(out.data(), audio.data(), 128), 0);
+}
+
+// A checkpoint makes the file readable as-is (the power-loss case) and recording continues after it.
+TEST(writer_checkpoint_leaves_a_readable_file_and_keeps_appending)
+{
+    MemFile f;
+    WavStreamWriter w;
+    CHECK(w.begin(&f, 1));
+    const auto audio = ramp(128);
+    CHECK_EQ(w.write(audio.data(), 64), 64u);
+    CHECK(w.checkpoint());
+
+    MemFile cut(f.bytes());                 // what the card holds if power fails now
+    WavStreamReader r;
+    CHECK(r.begin(&cut, cut.size()));
+    CHECK_EQ(r.data_bytes(), 64u);
+
+    CHECK_EQ(w.write(audio.data() + 64, 64), 64u);
+    w.finalize();
+    MemFile back(f.bytes());
+    WavStreamReader r2;
+    CHECK(r2.begin(&back, back.size()));
+    CHECK_EQ(r2.data_bytes(), 128u);
+    std::vector<uint8_t> out(128);
+    CHECK_EQ(r2.read(out.data(), 128), 128u);
     CHECK_EQ(std::memcmp(out.data(), audio.data(), 128), 0);
 }
 
@@ -352,7 +436,7 @@ TEST(writer_finalizes_an_empty_recording)
 
     MemFile back(f.bytes());
     WavStreamReader r;
-    CHECK(r.begin(&back));                  // a valid zero-length file, not a corrupt one
+    CHECK(r.begin(&back, back.size()));                  // a valid zero-length file, not a corrupt one
     CHECK_EQ(r.data_bytes(), 0u);
     CHECK(r.eof());
 }

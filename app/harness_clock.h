@@ -132,6 +132,9 @@ public:
                         _pulse_index   = 0;
                         _beat_index    = 0;
                     } else {
+                        // An early pulse: emit what the interpolator had not reached yet, so every
+                        // pulse yields exactly its share of ticks and no sequencer step is skipped.
+                        while (_ext_budget > 0) { _ext_budget--; emit_sub_tick(); }
                         _pulse_index++;
                     }
                     _tempo    = bpm;
@@ -143,6 +146,7 @@ public:
                     _tick_acc_ms  = 0.f;
                     _last_tick_ms = now;
                     emit_sub_tick();
+                    _ext_budget   = sub_per_pulse - 1;   // the rest of this pulse's share
                 }
             } else if (delta >= kExtClockTimeout) {
                 _pulse_index = 0;   // a gap that long is a new take, not a slow beat
@@ -175,6 +179,12 @@ public:
 
         while (_tick_acc_ms >= ms_per_tick) {
             _tick_acc_ms -= ms_per_tick;
+            // Under external sync the interpolator stops short of the next pulse's grid position: the
+            // edge emits that one. Without the stop, a pulse arriving late emitted it twice.
+            if (_external) {
+                if (_ext_budget == 0) { _tick_acc_ms = 0.f; break; }
+                _ext_budget--;
+            }
             emit_sub_tick();
         }
     }
@@ -218,6 +228,7 @@ private:
 
     uint8_t  _ext_ppq       = 1;      // pulses per quarter at the clock input (Eurorack default)
     uint32_t _pulse_index   = 0;      // which pulse of the current beat the last edge was
+    uint32_t _ext_budget    = 0;      // sub-ticks the interpolator may still emit before the next pulse
 
     uint32_t _last_edge_ms  = 0;
     uint32_t _last_tick_ms  = 0;

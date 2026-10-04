@@ -39,7 +39,7 @@ bool StreamDeck::start_play(DeckRef::Ref deck, const char* path) {
     Deck& d = _d[deck];
     if (d.mode.load(std::memory_order_acquire) != Mode::idle || d.finalizing) return false;
     if (!d.file.open_read(path)) return false;
-    if (!d.reader.begin(&d.file)) { d.file.close(); return false; }   // not a valid WAV
+    if (!d.reader.begin(&d.file, d.file.size())) { d.file.close(); return false; }   // not a valid WAV
     d.raw_src = false;
     d.play.start(&d.reader);
     d.mode.store(Mode::play, std::memory_order_release);             // ISR may now consume
@@ -51,6 +51,7 @@ bool StreamDeck::start_record(DeckRef::Ref deck, const char* path) {
     if (d.mode.load(std::memory_order_acquire) != Mode::idle || d.finalizing) return false;
     if (!d.file.open_write(path)) return false;
     if (!d.writer.begin(&d.file, 1)) { d.file.close(); return false; }  // mono header; placeholder failed
+    d.synced_body = 0;
     d.record.start(&d.writer);
     d.mode.store(Mode::record, std::memory_order_release);          // ISR may now produce
     return true;
@@ -257,6 +258,10 @@ void StreamDeck::_pump(Deck& d) {
         }
     } else if (m == Mode::record) {
         d.record.pump();                                          // drain captured audio to SD
+        if (d.writer.body_bytes() - d.synced_body >= kSyncBytes) {   // bound what power loss can take
+            d.writer.checkpoint();
+            d.synced_body = d.writer.body_bytes();
+        }
     }
     if (d.finalizing) {
         d.record.pump();                                          // flush the tail; finalize() patches header

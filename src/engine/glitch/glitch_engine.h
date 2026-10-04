@@ -13,6 +13,7 @@
 #include "engine/glitch/glitch_voice.h"
 #include "nocopy.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -107,8 +108,16 @@ private:
 
     int  _algo_index(DeckRef::Ref d) const;
     void _roll_random_pans();
+    void _apply_pending(int i);
 
     glitch::Voice _voice[2];
+
+    // Voice changes requested on the main loop, applied by process() at block start. Voice::set_algo
+    // resets the voice's whole State and rewrites its buffer, and the setters recompute fields in the
+    // same State; done from the main loop they tore against the voice running in the audio ISR.
+    std::atomic<int>  _want_algo[2]     = { {-1}, {-1} };   // algorithm index, -1 = none pending
+    std::atomic<bool> _want_regen[2]    = {};
+    std::atomic<bool> _params_dirty[2]  = {};               // _p1 / _p2 / _pitch changed
 
     // Per-deck cached control values (for param readback) and the output tone/volume state.
     float _p1[2]   = { 0.5f, 0.5f };

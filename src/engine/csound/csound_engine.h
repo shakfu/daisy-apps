@@ -70,6 +70,8 @@ private:
     float        _sr     = 48000.f;
     int          _ksmps  = 0;           // == block size; guards the process() copy (see publish order)
     int          _midi_instr = 0;       // Csound instr number of "MidiNote" (0 => MIDI notes dropped)
+    int          _nch_in  = 2;          // the live instance's nchnls_i / nchnls: the spin/spout strides
+    int          _nch_out = 2;
     bool         _patch_loaded = false; // true => running an SD slot; false => the built-in
 
     NoteQueue<32> _notes;               // pending MIDI notes: main loop pushes, process() (ISR) drains

@@ -17,9 +17,8 @@ namespace daisyapps {
 //   B8           SPDT toggle        -> button[1]
 //   gate_in_1/2  (pins B10 / B9)    -> gate[0..1]     (DaisyPatchSM gate_in_1/gate_in_2)
 //   daisy LED                       -> SetUserLed / SetIndicator(0)   (mono)
-// No rotary encoder, no display, so the encoder fields stay inert. Outputs are present but deferred
-// (input-focused scope): gate_out_1/2 (pins B5 / B6) and CV_OUT_1/CV_OUT_2 (DAC, pins C10 / C1) via
-// DaisyPatchSM::WriteCvOut + gpio writes. Audio is stereo (IN_L/R, OUT_L/R).
+// No rotary encoder, no display, so the encoder fields stay inert. Outputs: gate_out_1 (pin B5) and
+// CV_OUT_1/CV_OUT_2 (DAC, pins C10 / C1). Audio is stereo (IN_L/R, OUT_L/R).
 class PatchInitBoard {
 public:
     static constexpr int  kAnalogCount    = 8;   // 4 pots (CV_1..4) then 4 CV ins (CV_5..8)
@@ -45,10 +44,15 @@ public:
     void  StartAudio(daisy::AudioHandle::AudioCallback cb) { hw_.StartAudio(cb); }
     float SampleRate() { return hw_.AudioSampleRate(); }
 
-    // patch_sm::CV_1..CV_8 are ADC indices 0..7, so Analog(i) maps straight onto GetAdcValue(i).
+    // patch_sm::CV_1..CV_8 are ADC indices 0..7. libDaisy reads all eight as bipolar: the pots
+    // (CV_1..4) land on 0..1, the jacks (CV_5..8) on -1..1 for -5..+5 V. Rescale the jacks to the
+    // 0..1 that Controls promises, so 0 V reads 0.5 as on the Patch.
+    static constexpr int kFirstCvJack = 4;
     float Analog(int i)
     {
-        return (i >= 0 && i < kAnalogCount) ? hw_.GetAdcValue(i) : 0.f;
+        if (i < 0 || i >= kAnalogCount) return 0.f;
+        const float v = hw_.GetAdcValue(i);
+        return i < kFirstCvJack ? v : 0.5f + 0.5f * v;
     }
 
     void Poll(Controls& c)
@@ -57,7 +61,7 @@ public:
         button_.Debounce();
         toggle_.Debounce();
         c.analog_count = kAnalogCount;
-        for (int i = 0; i < kAnalogCount; i++) c.analog[i] = hw_.GetAdcValue(i);
+        for (int i = 0; i < kAnalogCount; i++) c.analog[i] = Analog(i);
         c.gate_count   = kGateCount;
         c.gate[0]      = hw_.gate_in_1.State();
         c.gate[1]      = hw_.gate_in_2.State();

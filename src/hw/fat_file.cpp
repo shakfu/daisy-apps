@@ -52,6 +52,10 @@ uint32_t FatFile::write(const void* src, uint32_t n) {
     return bw;
 }
 
+bool FatFile::sync() {
+    return _open && f_sync(&_f) == FR_OK;
+}
+
 bool FatFile::seek(uint32_t pos) {
     if (!_open) return false;
     return f_lseek(&_f, pos) == FR_OK;

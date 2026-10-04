@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -126,12 +127,19 @@ def app_artifact(engine: str, board: str) -> tuple[str, str]:
 
 # The control/UI board targets (src/board/board.h). All three are STM32H750, so they differ only by a
 # -DTARGET_* define (the harness Makefiles map BOARD= to it); the QSPI linker script and bootloader are
-# unchanged across them. Only `pod` is hardware-validated - see the note in write_manifest / the notes.
+# unchanged across them.
 BOARDS = ["pod", "patch_init", "patch"]
-VALIDATED_BOARDS = {"pod"}
 
-# libDaisy / DaisySP archives the harness link step needs. Unlike the fetched engine libs these build
-# offline from the vendored submodules, so the script builds them on demand rather than erroring.
+# (engine, board) pairs confirmed on a device. Per pair, not per board: a board driver working says
+# nothing about an engine never run on it. Patch entries are from docs/dev/hardware-bringup.md.
+VALIDATED = {("csound", "pod"), ("chuck", "pod")} | {
+    (e, "patch") for e in ("diag", "passthrough", "chorus", "filter", "reverb", "delay", "gigaverb",
+                           "voice", "qdelay", "glitch", "edrums")
+}
+
+# libDaisy / DaisySP archives the harness link step needs. Their sources come from
+# scripts/fetch_libs.sh at pinned revisions; once fetched they build offline, so a missing archive is
+# built on demand rather than treated as an error.
 DAISY_ARCHIVES = [
     ("libs/libDaisy", "build/libdaisy.a"),
     ("libs/DaisySP", "build/libdaisysp.a"),
@@ -190,7 +198,15 @@ def run_make(*args: str) -> None:
 
 
 def ensure_daisy_archives() -> None:
-    """Build libdaisy.a / libdaisysp.a if missing (offline, from the vendored submodules)."""
+    """Refuse an unpinned libs/, then build libdaisy.a / libdaisysp.a if missing.
+
+    A release must link the revisions scripts/fetch_libs.sh pins, or MANIFEST.txt's record of them
+    (and the GPL source offer that depends on it) would be wrong.
+    """
+    check = subprocess.run([str(REPO_ROOT / "scripts" / "fetch_libs.sh"), "--check"],
+                           capture_output=True, text=True)
+    if check.returncode != 0:
+        raise SystemExit("ERROR: libs/ is not at the pinned revisions:\n" + check.stdout.rstrip())
     for directory, archive in DAISY_ARCHIVES:
         if not (REPO_ROOT / directory / archive).exists():
             print(f"==> building {archive} (missing)")
@@ -248,21 +264,26 @@ def write_manifest(path: Path, version: str, dirty: str, git_sha: str,
         "daisy-apps firmware release",
         f"version:    {version}{dirty}",
         f"git commit: {git_sha}",
+    ]
+    for directory, _archive in DAISY_ARCHIVES:
+        rev = git_output("-C", str(REPO_ROOT / directory), "rev-parse", "HEAD") or "unknown"
+        lines.append(f"{Path(directory).name + ':':<11} {rev}")
+    lines += [
         "note:       these apps require a Daisy bootloader already installed (see RELEASE_NOTES.md)",
-        "note:       NOTHING here is hardware-validated except the pod csound/chuck harnesses;",
-        "            every app/ engine and the patch / patch_init board drivers compile but are untested",
+        "note:       the `tested` column marks the pairs confirmed on a device; the rest compile only",
     ]
     shipped_gpl = sorted({e for (e, _b) in sizes if e in GPL_ENGINES})
     if shipped_gpl:
         lines.append("note:       GPLv3 artifacts in this release: " + ", ".join(shipped_gpl))
     for engine, why in (skipped or []):
         lines.append(f"skipped:    {engine} ({why})")
-    lines += ["", f"{'engine':<12} {'board':<12} {'bytes':>12}  {'license':<7}  binary"]
+    lines += ["", f"{'engine':<12} {'board':<12} {'bytes':>12}  {'license':<7}  {'tested':<6}  binary"]
 
     for (engine, board), size in sizes.items():
         name = f"{ARTIFACT_PREFIX}-{engine}-{board}-{version}.bin"
         lic = "GPLv3" if engine in GPL_ENGINES else "MIT"
-        lines.append(f"{engine:<12} {board:<12} {size:>12}  {lic:<7}  {name}")
+        tested = "yes" if (engine, board) in VALIDATED else "no"
+        lines.append(f"{engine:<12} {board:<12} {size:>12}  {lic:<7}  {tested:<6}  {name}")
 
     if shipped_gpl:
         lines += ["", "GPLv3 artifacts (a combined work with GPLv3 DSP; source must be available):"]
@@ -279,7 +300,7 @@ def write_checksums(out_dir: Path) -> None:
 
 
 def changelog_section(version: str, changelog: Path | None = None) -> str | None:
-    """Return the CHANGELOG.md body under `## [<version>]`, trimmed of blank edges.
+    """Return the CHANGELOG.md body under `## [<version>]` (dated or not), trimmed of blank edges.
 
     Falls back to `## [Unreleased]` when the version-named heading is absent or empty (e.g. a
     describe-derived version with no matching heading, or the pre-release state where everything
@@ -295,11 +316,12 @@ def changelog_section(version: str, changelog: Path | None = None) -> str | None
         body: list[str] = []
         in_section = False
         for line in text.splitlines():
-            if line == f"## [{name}]":
+            # Keep a Changelog dates a release heading: `## [0.1.0] - 2026-10-04`.
+            if line == f"## [{name}]" or line.startswith(f"## [{name}] "):
                 in_section = True
                 continue
-            if in_section and line.startswith("## ["):
-                break
+            if in_section and (line.startswith("## [") or re.match(r"\[[^\]]+\]: \S", line)):
+                break   # next section, or the link references at the end of the file
             if in_section:
                 body.append(line)
         return "\n".join(body) if in_section else None
@@ -319,17 +341,14 @@ def changelog_section(version: str, changelog: Path | None = None) -> str | None
 
 def flashing_section(version: str, engines: list[str], boards: list[str]) -> str:
     """The `## Flashing ...` section of the release notes (markdown)."""
-    untested = [b for b in boards if b not in VALIDATED_BOARDS]
+    pairs = [(e, b) for e in engines for b in boards]
+    tested = [p for p in pairs if p in VALIDATED]
     untested_note = ("""
-### Note on board targets
+### Hardware testing
 
-Only the `pod` binaries are validated on hardware. The {names} build{plural} are provided for
-convenience but {have} not been tested on a device.
-""".format(
-        names=" and ".join(f"`{b}`" for b in untested),
-        plural="s" if len(untested) > 1 else "",
-        have="have" if len(untested) > 1 else "has",
-    ) if untested else "")
+{n_tested} of {n_all} binaries have been confirmed on a device; `MANIFEST.txt` marks which. The rest
+compile but have never run on hardware.
+""".format(n_tested=len(tested), n_all=len(pairs)) if len(tested) < len(pairs) else "")
 
     return f"""## Flashing a daisy-apps firmware ({version})
 
@@ -338,10 +357,11 @@ Each `.bin` here is a complete app for one engine on one board, named
 
 ### Prerequisite
 
-These are QSPI apps (they execute in place from QSPI flash because the language runtimes are too
-big for SRAM), loaded at the standard Daisy app base. They are not standalone: a QSPI-capable Daisy
-bootloader must already be installed on the device. Installing the bootloader is a separate,
-device-level procedure not covered here.
+Every binary is flashed to the standard Daisy app base and needs a Daisy bootloader already on the
+device. Most `app/` engines (and `diag`) are SRAM apps: the bootloader copies them from QSPI into the
+480 KB execution SRAM. `mosc` and the `csound` / `chuck` harnesses are QSPI apps that execute in place.
+From a source checkout, `make program-boot` in `app/` installs libDaisy's bootloader; see
+`app/README.md` and `pod/README.md`.
 
 ### Step 1: enter bootloader mode
 
@@ -440,6 +460,10 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
     version = args.version or default_version()
+    # dist/<version> is rmtree'd below; "..", "/" or "" would point that at the repo itself.
+    if not version or version in (".", "..") or "/" in version or "\\" in version:
+        print(f"error: invalid VERSION {version!r}", file=sys.stderr)
+        return 2
     explicit = bool(args.engines) or bool(os.environ.get("RELEASE_ENGINES", "").split())
     engines = resolve_list(args.engines, "RELEASE_ENGINES", default_engines(), "engine", ALL_ENGINES)
 

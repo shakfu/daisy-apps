@@ -120,7 +120,8 @@ struct ResoEngine::Impl {
         dk.ps.chord = 0;
         dk.ps.tonic = 0.f;
         dk.ps.fm    = 0.f;
-        dk.part.set_model(model_for(dk.model));
+        // No part.set_model here: process() applies dk.model. Rings' Process clears its dirty_ flag
+        // after reconfiguring, so a set_model from the main loop landing mid-reconfigure was lost.
     }
 
     void trigger(DeckRef::Ref dref, float note) {
@@ -206,8 +207,11 @@ struct ResoEngine::Impl {
                     for (size_t i = 0; i < n; i++) inbuf[i] = 0.f;
                 }
 
-                dk.ps.note  = dk.note;
+                // Rings indexes lut_pitch_ratio_high[257] by note-69 (+/-128) with no bounds check;
+                // CV + drift spread + arp can push past it, so clamp to the MIDI range here.
+                dk.ps.note  = clampf(dk.note, 0.f, 127.f);
                 dk.ps.strum = dk.strum_pending;
+                dk.part.set_model(model_for(dk.model));   // no-op unless the model changed
                 dk.part.Process(dk.ps, dk.patch, inbuf, outbuf, auxbuf, n);
                 dk.strum_pending = false;
 

@@ -13,6 +13,7 @@ struct IByteFile {
     virtual uint32_t read(void* dst, uint32_t n) = 0;        // bytes read (< n at EOF)
     virtual uint32_t write(const void* src, uint32_t n) = 0; // bytes written (< n only on a device error)
     virtual bool     seek(uint32_t pos) = 0;                 // absolute byte offset
+    virtual bool     sync() { return true; }                 // commit written data to the medium
 };
 
 } // namespace daisyapps

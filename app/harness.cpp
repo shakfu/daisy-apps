@@ -97,12 +97,15 @@ static constexpr int kBlock = 48;
 // the units IEngine expects. NOT CALIBRATED: upstream runs V/Oct through a per-unit calibration table
 // (three measured reference voltages) and this is a plain linear assumption of a bipolar +/-5 V jack.
 // Pitch tracking will therefore be approximate until someone measures a real board and corrects this.
+static constexpr uint32_t kGateOutPulseMs = 7;   // the trigger width engines assume (pstretch, bard)
+
 static constexpr float kCvVoltSpan = 10.f;   // -5 V .. +5 V
 
 // IEngine::cv_voct takes an offset in SEMITONES, 0 = neutral (upstream's corrector returns note
-// numbers; pstretch divides by 12 to get octaves, radio reads it as a station offset). 1 V/oct over a
-// 10 V span is 120 semitones.
-static constexpr float kCvVoctSemitones = kCvVoltSpan * 12.f;
+// numbers; pstretch divides by 12 to get octaves, radio reads it as a station offset). It scales the
+// -1..1 bipolar reading, so it is the HALF span: +/-5 V at 1 V/oct is +/-60 semitones.
+static constexpr float kCvVoctSemitones = kCvVoltSpan * 0.5f * 12.f;
+static_assert(kCvVoctSemitones == 60.f, "bipolar 1.0 must be +5 V = 60 semitones at 1 V/oct");
 
 // SDRAM arena the engines sub-allocate their buffers from (delay lines, reverb tails, grain clouds).
 // The Daisy has 64 MB; 48 MB is what sk-engines hands its engines, and the engines that want less
@@ -267,9 +270,11 @@ int main(void)
     bool     prev_gate[daisyapps::Controls::kMaxGates]     = {false, false};
     bool     prev_button[daisyapps::Controls::kMaxButtons] = {false, false, false, false};
     bool     enc_was_held  = false;
-    bool     enc_turned    = false;   // a turn while held is a gesture, not a click
+    bool     enc_turned    = false;   // a turn (or an Aux knob move) while held is a gesture, not a click
     int      mode_config   = 0;       // screenless boards only: the click's Mode cycle position
     float    aux           = 0.f;     // the CapAux selector position (0..1), scrolled by hold+turn
+    float    aux_knob_ref  = 0.f;     // knob 1 at the press, so only a MOVE of it selects
+    uint32_t gate_out_until = 0;      // gate-out pulse deadline (now_ms domain)
     // Deadband reference per CV input. Seeded to 0.5 (the neutral mid-scale reading) rather than 0, so
     // an unpatched jack sitting at centre does not fire a spurious write on the first pass.
     float    cv_last[4]    = {0.5f, 0.5f, 0.5f, 0.5f};
@@ -342,9 +347,11 @@ int main(void)
             // the selector to the ENCODER's rotation instead, which worked but made it the odd one out
             // and gave a continuous selector a detent-at-a-time feel.
             //
-            // The knob is absolute: the selector snaps to wherever knob 1 is when you start, which is
+            // The knob is absolute: once it moves, the selector snaps to where knob 1 is, which is
             // what the pod harness does and what a selector wants (a position, not an accumulation).
-            // Deadbanded, because a still pot still jitters and every write is a model/kit/slot change.
+            // Pressing alone selects nothing: the press seeds the selector from the engine and
+            // records the knob, and only a move past the deadband writes. That move also marks the
+            // hold as a gesture, so the release is not taken as a click.
             //
             // Knob 1 is LENT for the duration - see ParamUI::set_knob_suspended - so it is not also
             // writing the parameter it normally addresses, and it must re-catch after release.
@@ -352,8 +359,13 @@ int main(void)
                 ui.set_knob_suspended(0, true);
                 if (controls.analog_count > 0) {
                     const float k = controls.analog[0];
-                    if (std::fabs(k - aux) > 0.004f) {
-                        aux = k;
+                    if (!enc_was_held) {
+                        aux          = engine.param(ParamId::Aux, s_deck);
+                        aux_knob_ref = k;
+                    } else if (std::fabs(k - aux_knob_ref) > 0.004f) {
+                        aux_knob_ref = k;
+                        aux          = k;
+                        enc_turned   = true;
                         engine.set_param(ParamId::Aux, s_deck, aux);
                     }
                 }
@@ -454,7 +466,10 @@ int main(void)
         // process_cv fills -1..1; the boards' CV outs are unipolar 0-5 V, so centre at 2.5 V.
         board.SetCvOut(0, 0.5f + 0.5f * s_cv[0]);
         board.SetCvOut(1, 0.5f + 0.5f * s_cv[1]);
-        board.SetGateOut(engine.gate_out_triggered(s_deck));
+        // gate_out_triggered is clear-on-read, so the platform stretches it to a pulse that a
+        // downstream module can see. Wrap-safe deadline compare.
+        if (engine.gate_out_triggered(s_deck)) gate_out_until = now_ms + kGateOutPulseMs;
+        board.SetGateOut(static_cast<int32_t>(gate_out_until - now_ms) > 0);
 
         engine.prepare();
 

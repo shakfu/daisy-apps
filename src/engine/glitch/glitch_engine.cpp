@@ -22,7 +22,23 @@ void GlitchEngine::init(const EngineContext& ctx) {
     }
 }
 
+// Audio ISR, block start: the only place the voices are mutated once audio runs. A set_algo or regen
+// here costs one ~4000-sample buffer fill, inside a block.
+void GlitchEngine::_apply_pending(int i) {
+    const int a = _want_algo[i].exchange(-1, std::memory_order_acquire);
+    if (a >= 0 && a != static_cast<int>(_voice[i].algo())) _voice[i].set_algo(static_cast<glitch::Algo>(a));
+    if (_params_dirty[i].exchange(false, std::memory_order_acquire)) {
+        _voice[i].set_p1(_p1[i]);
+        _voice[i].set_p2(_p2[i]);
+        _voice[i].set_pitch(_pitch[i]);
+    }
+    if (_want_regen[i].exchange(false, std::memory_order_acquire)) _voice[i].regen();
+}
+
 void GlitchEngine::process(const float* const* /*in*/, float** out, size_t size) {
+    _apply_pending(0);
+    _apply_pending(1);
+
     // Per-deck stereo placement from the routing switch (mirrors the radio engine).
     float pLa, pRa, pLb, pRb;
     switch (_route) {
@@ -52,9 +68,9 @@ void GlitchEngine::process(const float* const* /*in*/, float** out, size_t size)
 // Crossfade -> A/B blend, Alt+PITCH (Aux) -> ALGORITHM select.
 void GlitchEngine::set_param(ParamId id, DeckRef::Ref d, float v) {
     const int i = (d == DeckRef::A) ? 0 : 1;
-    if (id == ParamId::Size)            { _p1[i] = v; _voice[i].set_p1(v); }
-    else if (id == ParamId::Pos)        { _p2[i] = v; _voice[i].set_p2(v); }
-    else if (id == ParamId::Speed)      { _pitch[i] = v; _voice[i].set_pitch(v); }
+    if (id == ParamId::Size)            { _p1[i] = v;    _params_dirty[i].store(true, std::memory_order_release); }
+    else if (id == ParamId::Pos)        { _p2[i] = v;    _params_dirty[i].store(true, std::memory_order_release); }
+    else if (id == ParamId::Speed)      { _pitch[i] = v; _params_dirty[i].store(true, std::memory_order_release); }
     else if (id == ParamId::Env)        { _tone[i] = v * v; }                       // 0 = dark, 1 = open
     else if (id == ParamId::Mix)        { _gain[i] = v; }
     else if (id == ParamId::Crossfade)  { _xfade = v; _gA = v <= 0.5f ? 1.f : 2.f * (1.f - v);
@@ -63,7 +79,7 @@ void GlitchEngine::set_param(ParamId id, DeckRef::Ref d, float v) {
         _aux[i] = v;
         int idx = static_cast<int>(v * glitch::kAlgoCount);
         idx = idx < 0 ? 0 : (idx >= glitch::kAlgoCount ? glitch::kAlgoCount - 1 : idx);
-        if (idx != _algo_index(d)) _voice[i].set_algo(static_cast<glitch::Algo>(idx));
+        _want_algo[i].store(idx, std::memory_order_release);   // applied in process(); a no-op if unchanged
     }
 }
 
@@ -101,7 +117,7 @@ bool GlitchEngine::set_config(ConfigId id, DeckRef::Ref, int value) {
 // Play pad -> regenerate this deck's glitch buffer (a fresh sparse pattern for the buffer-player algos).
 // Rev pad inert. Returns false (no is-empty LED semantics for a generator).
 bool GlitchEngine::on_play_pad(DeckRef::Ref d, bool reverse) {
-    if (!reverse) _voice[(d == DeckRef::A) ? 0 : 1].regen();
+    if (!reverse) _want_regen[(d == DeckRef::A) ? 0 : 1].store(true, std::memory_order_release);
     return false;
 }
 

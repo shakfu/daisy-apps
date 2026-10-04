@@ -9,6 +9,8 @@ Documents that live in this repo:
   it there, and the patch that does it (`scripts/patches/midi_daisy.patch`).
 - [`hardware-bringup.md`](hardware-bringup.md) — the ordered bench plan for validating `app/` on a
   Daisy Patch, and the running record of what has actually been observed on a device.
+- [`control-queue.md`](control-queue.md) — a rejected design for applying panel changes in the audio
+  callback, and the per-engine audit of which mutators could run there.
 
 ## References to documents that are not here
 

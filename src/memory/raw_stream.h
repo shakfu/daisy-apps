@@ -63,7 +63,8 @@ public:
             } else if (std::memcmp(hdr, "data", 4) == 0) {
                 if (!haveFmt || fmt != 1 || bits != 16 || ch != 1) return false;  // 16-bit mono PCM only
                 uint32_t ds = size;
-                if (body + ds > filesize) ds = (filesize > body) ? (filesize - body) : 0;  // truncated
+                if (body >= filesize) ds = 0;                                 // truncated (written so
+                else if (ds > filesize - body) ds = filesize - body;          // `body + ds` cannot wrap)
                 ds &= ~(kBytesPerFrame - 1u);
                 if (ds < kBytesPerFrame) return false;
                 _data_start = body; _data_size = ds; _remaining = ds; out_rate = rate;

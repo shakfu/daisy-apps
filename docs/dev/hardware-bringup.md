@@ -3,8 +3,8 @@
 A running record, not a finished document. Fill in the results as you go; a failure here is worth more
 written down than remembered.
 
-**Nothing in `app/` has ever run on a device, and neither has the Patch board driver.** That is the
-whole point of this exercise, and it is also why the ORDER below matters more than the coverage: each
+Before the session below, nothing in `app/` had run on a device, and neither had the Patch board
+driver. That is why the ORDER below matters more than the coverage: each
 stage adds exactly one new unknown, so a failure names its own cause. Testing engines in a random
 order would leave every symptom ambiguous between the engine, the harness and the driver.
 

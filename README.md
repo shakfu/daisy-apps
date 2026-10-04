@@ -58,7 +58,7 @@ cd pod  && make -f Makefile.chuck BOARD=pod  # ChucK harness for the Pod
 
 Note one difference between the two Eurorack targets that matters for anything CV-driven: on the Daisy Patch a knob and its jack are summed in analog hardware ahead of the ADC, so a `CTRL` reading is one inseparable knob+CV value and the knob acts as the offset for its input. patch.init() instead exposes four dedicated CV jacks after its four pots.
 
-The Pod is the only board validated on hardware, and only with the csound/chuck harnesses. `patch_board.h` / `patch_init_board.h` and everything under `app/` compile for every target but have never been run on a device.
+Hardware status: the Pod runs the csound/chuck harnesses. On the Daisy Patch, 11 of 21 `app/` builds are confirmed ([`docs/dev/hardware-bringup.md`](docs/dev/hardware-bringup.md)). Nothing has run on patch.init(), and no `app/` engine has run on the Pod.
 
 ## Prerequisites
 
@@ -145,19 +145,19 @@ A firmware built with `ENGINE=qdelay` or `ENGINE=glitch` is a combined work and 
 `make dist` (root `Makefile`) builds every firmware in the engine x board matrix in one shot and collects version-stamped, checksummed binaries under `dist/<version>/` for users who want to download-and-flash rather than build. It drives [`scripts/build_release.py`](scripts/build_release.py), which clean-builds each `(engine, board)` pair, names the artifacts `daisy-<engine>-<board>-<version>.bin`, and writes `MANIFEST.txt`, `SHA256SUMS`, and `RELEASE_NOTES.md` (the CHANGELOG section for the version plus flashing instructions). The script is stdlib-only, so plain `python3` suffices.
 
 ```
-make dist                                          # describe-derived version, full matrix (2 engines x 3 boards)
+make dist                                          # describe-derived version, full matrix (23 engines x 3 boards)
 make dist VERSION=0.1.0                             # explicit version (the bare tag you will create)
 make dist WITH_HEX=1                                # also emit .hex (ST-Link / STM32CubeProgrammer)
 ```
 
-`RELEASE_ENGINES` and `RELEASE_BOARDS` restrict the matrix to a subset (space-separated lists; they override the defaults of `csound chuck` and `pod patch_init patch`). Valid engines are `csound` / `chuck`; valid boards are `pod` / `patch_init` / `patch` — anything else errors with the valid list.
+`RELEASE_ENGINES` and `RELEASE_BOARDS` restrict the matrix to a subset (space-separated lists). The defaults are every engine (`make list-engines` in `app/`, plus `diag`, `csound`, `chuck`) and `pod patch_init patch`. Anything else errors with the valid list.
 
 ```
-make dist RELEASE_BOARDS=pod                        # one board, both engines (2 artifacts)
-make dist RELEASE_ENGINES=csound                    # one engine, all boards (3 artifacts)
+make dist RELEASE_BOARDS=patch                      # one board, every engine
+make dist RELEASE_ENGINES=reverb                    # one engine, all boards (3 artifacts)
 make dist RELEASE_BOARDS=pod RELEASE_ENGINES=csound # a single pair (1 artifact)
 ```
 
 `make dist` covers **both harness families**: all 20 engine-host engines plus the diagnostic, and the two `pod/` audio-language harnesses. The csound and chuck entries are skipped with a notice if their cross-built libraries have not been fetched, so a fresh checkout can build a release without them. `MANIFEST.txt` carries a per-artifact license column, and the release notes call out the GPLv3 binaries (`qdelay`, `glitch`) by name — see Licensing above.
 
-The cross-compiled engine libs (`scripts/fetch_csound.sh` / `scripts/fetch_chuck.sh`) must exist first; the `libDaisy` / `DaisySP` archives are built on demand if missing. Only the `pod` board is hardware-validated, so the `patch_init` / `patch` artifacts are flagged untested in the manifest and notes. `dist/` is gitignored; `make gh-release VERSION=<v>` uploads an already-built `dist/<v>/` as a GitHub release via `gh`.
+The `libDaisy` / `DaisySP` archives are built on demand if missing. `MANIFEST.txt` has a `tested` column marking the (engine, board) pairs confirmed on a device; the release notes give the count. `dist/` is gitignored; `make gh-release VERSION=<v>` uploads an already-built `dist/<v>/` as a GitHub release via `gh`.

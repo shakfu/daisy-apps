@@ -290,6 +290,6 @@ reproduced on demand). It needs the `arm-none-eabi` toolchain on `PATH`.
 
 ## Status
 
-Every engine x board combination in the table compiles. **None of it has been run on hardware** - the
-Patch driver (MIDI, OLED, CV/gate out) and this harness are new, and the Pod is the only board this
-repo has ever validated on a device.
+Every engine x board combination in the table compiles. On the Daisy Patch, 11 of 21 builds are
+confirmed on hardware; [`docs/dev/hardware-bringup.md`](../docs/dev/hardware-bringup.md) lists them.
+Nothing here has run on the Pod or patch.init().

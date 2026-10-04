@@ -14,10 +14,12 @@ public:
     bool open_write(const char* path);
     void close();
     bool is_open() const { return _open; }
+    uint32_t size() const { return _open ? static_cast<uint32_t>(f_size(&_f)) : 0u; }
 
     uint32_t read(void* dst, uint32_t n) override;
     uint32_t write(const void* src, uint32_t n) override;
     bool     seek(uint32_t pos) override;
+    bool     sync() override;
 
 private:
     FIL  _f;

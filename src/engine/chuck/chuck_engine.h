@@ -3,6 +3,9 @@
 #pragma once
 
 #include "engine/iengine.h"
+
+#include <atomic>
+#include <cstdint>
 #include "engine/chuck/chuck_patch.h"        // kMaxChuckSlots (bank size) + the SD .ck selector
 #include "engine/csound/csound_reload.h"     // ReloadGate: lock-free VM<->ISR handoff for live swap
 #include "engine/midi_note.h"                // NoteQueue / MidiNoteEvent / midi_note_to_hz (global bridge)
@@ -172,6 +175,10 @@ private:
     // Cached 0..1 knob values for param() pickup readback + post-reload reseed, per (ParamId, deck).
     static constexpr int kSlots = 16;     // 8 per deck
     float _cache[kSlots] = {0.f};
+    // Slots whose _cache value the VM has not seen yet. set_param (main loop) sets a bit; process()
+    // (ISR) drains it into setGlobalFloat, so the ISR is the only producer on ChucK's SPSC request queue.
+    std::atomic<uint32_t> _dirty{0};
+    static_assert(kSlots <= 32, "_dirty is a 32-bit mask");
 
     NoteQueue<32> _notes;                 // global bridge: NoteOns; main loop pushes, process() (ISR) drains
     MidiMsgQueue<64> _midi;               // real MidiIn: full raw stream; main loop pushes, ISR drains+injects

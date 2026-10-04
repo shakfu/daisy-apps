@@ -74,6 +74,7 @@ private:
         // anyway.
         std::atomic<uint32_t> gen{0};
         bool            finalizing = false;  // record stopped; main loop flushing the tail + finalizing
+        uint32_t        synced_body = 0;     // writer body bytes covered by the last checkpoint
         SpscRing        ring;
         PlayStream      play;
         RecordStream    record;
@@ -84,6 +85,10 @@ private:
         FatFile         file;                // one file handle per deck (play XOR record)
     };
     Deck _d[2];
+
+    // Record checkpoint interval: ~1.4 s of mono float at 48 kHz. Each costs one f_sync on the main
+    // loop; power loss loses at most this much of a take.
+    static constexpr uint32_t kSyncBytes = 256u * 1024u;
 
     void _pump(Deck& d);
 };

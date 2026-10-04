@@ -132,7 +132,9 @@ void CsoundEngine::publish_instance(CSOUND* cs)
     // Set the derived state BEFORE publishing: the gate's seq_cst publish/begin_use pair makes these
     // plain writes visible to the ISR together with the new pointer (the ISR only reads _ksmps/
     // _midi_instr after begin_use() returns a non-null instance).
-    _ksmps = csoundGetKsmps(cs);
+    _ksmps   = csoundGetKsmps(cs);
+    _nch_in  = static_cast<int>(csoundGetChannels(cs, 1));   // an SD patch may be mono, or wider
+    _nch_out = static_cast<int>(csoundGetChannels(cs, 0));
     const int n = csoundGetInstrNumber(cs, kMidiInstrName);
     _midi_instr = (n > 0) ? n : 0;
     _gate.publish(cs);
@@ -262,7 +264,7 @@ void CsoundEngine::prepare()
 void CsoundEngine::process(const float* const* in, float** out, size_t size)
 {
     CSOUND* cs = static_cast<CSOUND*>(_gate.begin_use());
-    if (!cs || _ksmps <= 0) {                    // no instance (boot fail / mid-reload) -> silence
+    if (!cs || _ksmps <= 0 || _nch_out <= 0) {   // no instance (boot fail / mid-reload) -> silence
         for (size_t i = 0; i < size; i++) { out[0][i] = 0.f; out[1][i] = 0.f; }
         _gate.end_use();
         return;
@@ -272,11 +274,15 @@ void CsoundEngine::process(const float* const* in, float** out, size_t size)
     MYFLT*       spin  = csoundGetSpin(cs);       // ksmps*nchnls, interleaved
     const MYFLT* spout = csoundGetSpout(cs);
 
+    // Interleaved at the patch's own channel counts: a fixed stride of 2 overran spin/spout for a
+    // mono patch. Extra Csound channels are fed silence and not played.
+    const size_t ni = static_cast<size_t>(_nch_in), no = static_cast<size_t>(_nch_out);
     const float* il = in ? in[0] : nullptr;
     const float* ir = in ? in[1] : nullptr;
     for (size_t i = 0; i < n; i++) {              // de-interleaved in -> interleaved spin
-        spin[i * 2]     = il ? static_cast<MYFLT>(il[i]) : 0;
-        spin[i * 2 + 1] = ir ? static_cast<MYFLT>(ir[i]) : 0;
+        for (size_t c = 0; c < ni; c++) spin[i * ni + c] = 0;
+        if (ni > 0) spin[i * ni]     = il ? static_cast<MYFLT>(il[i]) : 0;
+        if (ni > 1) spin[i * ni + 1] = ir ? static_cast<MYFLT>(ir[i]) : 0;
     }
 
     // Drain pending MIDI notes HERE (audio ISR), so every csoundEvent + the instrument allocation it
@@ -295,8 +301,8 @@ void CsoundEngine::process(const float* const* in, float** out, size_t size)
     csoundPerformKsmps(cs);                       // one k-cycle: consumes spin, fills spout
 
     for (size_t i = 0; i < n; i++) {              // interleaved spout -> de-interleaved out
-        out[0][i] = static_cast<float>(spout[i * 2]);
-        out[1][i] = static_cast<float>(spout[i * 2 + 1]);
+        out[0][i] = static_cast<float>(spout[i * no]);
+        out[1][i] = static_cast<float>(spout[i * no + (no > 1 ? 1 : 0)]);   // mono -> both sides
     }
     _gate.end_use();
 }

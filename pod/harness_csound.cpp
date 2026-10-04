@@ -12,6 +12,10 @@
 #include "engine/csound/csound_engine.h"
 #include "sd_stream_deck.h"
 
+#include <cerrno>
+#include <cmath>
+#include <malloc.h>
+
 using namespace daisy;
 
 // CsoundEngine::init() calls csound_heap_arm() to arm the full firmware's dual SDRAM pool
@@ -19,6 +23,35 @@ using namespace daisy;
 // Csound's heap straight in SDRAM via the Csound-port QSPI linker script (newlib malloc). So provide
 // a no-op definition here to satisfy the symbol; Csound just allocates from the linker-script heap.
 namespace daisyapps { void csound_heap_arm() noexcept {} }
+
+// That newlib heap is shared by the main loop (a live reload builds a whole new instance) and the
+// audio ISR (csoundEvent instantiates a MidiNote instrument). newlib serialises malloc only through
+// these hooks, whose default is a no-op on a single-threaded build, so an ISR malloc landing inside
+// a main-loop malloc corrupts the heap. Mask interrupts for the critical section instead. Recursive:
+// realloc and the reent cleanup re-enter the lock.
+static uint32_t s_malloc_depth   = 0;
+static uint32_t s_malloc_primask = 0;
+extern "C" void __malloc_lock(struct _reent*)
+{
+    const uint32_t pm = __get_PRIMASK();
+    __disable_irq();
+    if (s_malloc_depth++ == 0) s_malloc_primask = pm;
+}
+extern "C" void __malloc_unlock(struct _reent*)
+{
+    if (--s_malloc_depth == 0 && s_malloc_primask == 0) __enable_irq();
+}
+
+// Csound 7's memalloc.c calls aligned_alloc. newlib-nano's aligned_alloc calls posix_memalign, which
+// nano does not ship (only memalign), so the link failed. Provide it over memalign.
+extern "C" int posix_memalign(void** out, size_t align, size_t size)
+{
+    if (align < sizeof(void*) || (align & (align - 1)) != 0) return EINVAL;
+    void* p = memalign(align, size);
+    if (!p) return ENOMEM;
+    *out = p;
+    return 0;
+}
 
 static const int kBlock = 256;   // Csound-friendly block; becomes ksmps inside the engine
 
@@ -87,11 +120,17 @@ int main(void)
         const bool selecting = controls.enc_press;
         engine.set_aux_active(DeckRef::A, selecting);
 
+        // Deadbanded, as in harness_chuck.cpp: without it every main-loop pass called
+        // csoundSetControlChannel for a pot that had not moved.
+        static float sent[3] = {-1.f, -1.f, -1.f};   // Aux, Speed, Mix
+        auto send = [](int i, ParamId id, float v) {
+            if (std::fabs(v - sent[i]) > 0.004f) { sent[i] = v; engine.set_param(id, DeckRef::A, v); }
+        };
         if (selecting) {
-            if (controls.analog_count > 0) engine.set_param(ParamId::Aux, DeckRef::A, controls.analog[0]); // scroll bank
+            if (controls.analog_count > 0) send(0, ParamId::Aux, controls.analog[0]);   // scroll bank
         } else {
-            if (controls.analog_count > 0) engine.set_param(ParamId::Speed, DeckRef::A, controls.analog[0]); // knob1 -> pitch
-            if (controls.analog_count > 1) engine.set_param(ParamId::Mix,   DeckRef::A, controls.analog[1]); // knob2 -> level
+            if (controls.analog_count > 0) send(1, ParamId::Speed, controls.analog[0]); // knob1 -> pitch
+            if (controls.analog_count > 1) send(2, ParamId::Mix,   controls.analog[1]); // knob2 -> level
         }
         engine.prepare();
     }

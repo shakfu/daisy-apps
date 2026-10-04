@@ -116,6 +116,18 @@ static const ParamId kMappedParams[] = {
     ParamId::Feedback, ParamId::ModSpeed, ParamId::ModAmp,
 };
 
+// Reverse of global_for: the global a cache slot feeds, or nullptr for an unmapped slot.
+static const char* global_for_slot(int s)
+{
+    const DeckRef::Ref d = s < 8 ? DeckRef::A : DeckRef::B;
+    for (ParamId id : kMappedParams) {
+        int slot = -1;
+        const char* name = global_for(id, d, slot);
+        if (slot == s) return name;
+    }
+    return nullptr;
+}
+
 // Scratch buffer size for an SD-loaded program. A `.ck` patch is a few KB; 64 KB is generous head-
 // room. It is malloc'd from the (armed) SDRAM pool, used only during compile, then freed.
 static constexpr int kPatchMax = 64 * 1024;
@@ -466,9 +478,10 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
         _inbuf[i * 2 + 1] = ir ? ir[i] : 0.f;
     }
 
-    // Deliver this block's MIDI notes to the VM here (audio thread), right before run() so the queued
-    // globals apply before any shred runs this block (same thread as run(), so no race - mirrors
-    // set_param). Gather all NoteOns per deck into a batch, hand it over as an array + count, then ONE
+    // Deliver this block's MIDI notes and knob writes to the VM here (audio thread), right before run()
+    // so the queued globals apply before any shred runs this block. Every global write happens on this
+    // thread: ChucK's request queue is single-producer, and a main-loop put() preempted by this one
+    // corrupts its head index. Gather all NoteOns per deck into a batch, hand it over as an array + count, then ONE
     // broadcast: the .ck program sporks a voice per note, so chords play polyphonically (a shared scalar
     // would coalesce to the last note). setGlobalIntArray allocates, but only on blocks that carry notes.
     if (Chuck_Globals_Manager* g = ck->globals()) {
@@ -484,6 +497,10 @@ void ChuckEngine::process(const float* const* in, float** out, size_t size)
             g->setGlobalIntArray(note_array_global(d), batch[d], static_cast<t_CKUINT>(n[d]));
             g->setGlobalInt(note_count_global(d), n[d]);
             g->broadcastGlobalEvent(note_event_global(d));
+        }
+        for (uint32_t m = _dirty.exchange(0, std::memory_order_acquire); m; m &= m - 1) {
+            const int s = __builtin_ctz(m);
+            if (const char* name = global_for_slot(s)) g->setGlobalFloat(name, _cache[s]);
         }
     }
 
@@ -542,15 +559,11 @@ void ChuckEngine::set_param(ParamId id, DeckRef::Ref d, float v)
 
     int slot = -1;
     const char* name = global_for(id, d, slot);
-    if (slot >= 0 && slot < kSlots) _cache[slot] = v;   // cache even while mid-reload (for reseed)
-    if (!_ck || !name) return;
-    // Called from the main loop while process() runs in the audio ISR. With __DISABLE_THREADS__ the
-    // globals queue is drained on the audio thread, so this enqueues a write that the next run()
-    // applies - the intended host -> .ck-program path (mirrors Csound's setControlChannel). globals()
-    // is NULL until the VM is running; init() now start()s it, but null-guard anyway (a set_param
-    // before init() must not deref NULL).
-    Chuck_Globals_Manager* g = _ck->globals();
-    if (g) g->setGlobalFloat(name, v);
+    if (!name || slot < 0 || slot >= kSlots) return;
+    // Main loop: cache only (also read by reseed after a reload), and flag the slot for process() to
+    // hand to the VM. A float store is single-copy atomic on the M7; the release pairs with the drain.
+    _cache[slot] = v;
+    _dirty.fetch_or(1u << slot, std::memory_order_release);
 }
 
 float ChuckEngine::param(ParamId id, DeckRef::Ref d) const

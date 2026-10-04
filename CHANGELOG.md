@@ -2,9 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project is pre-release and does not yet follow semantic versioning, so everything since the initial commit lives under **Unreleased**.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project does not yet follow semantic versioning.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-04
 
 ### Added
 
@@ -48,13 +50,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`scripts/check_docs.sh`** and **`docs/dev/README.md`** — the sk-engines design notes cited from ported sources were never ported with them. Rewriting those citations would break the verbatim-port property, so the 16 known absences are catalogued instead, and the script enforces the list in both directions: a *new* dead link fails, and so does a catalogued entry that has since been written. Runs as part of `make test`.
 
-- **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Two jobs on every push, pull request, manual dispatch, and weekly. `test` runs the host suite and the documentation-reference check with no cross toolchain (~1 minute). `firmware` is a matrix over all three boards, each sweeping **every** engine plus `diag` — a full board sweep is ~40 s on 16 cores, cheap enough that there is no reason to test a subset. The matrix is the point: only one board's driver compiles per build, so a change to `patch_init_board.h` is invisible to a `BOARD=patch` build, which is how that file carried a stale libDaisy GPIO call through an API change unnoticed. The ARM toolchain is pinned to the 10.x generation the project is developed against, because the vendored trees (Faust kernels, the gen~ export, Rings/Plaits, softcut-lib) are not known to be clean under a modern GCC and Ubuntu's package is 14.x. Firmware sizes and the resolved libDaisy/DaisySP revisions are written to each run's summary — the first because several engines needed `-Os` to fit SRAM_EXEC and a size regression is how a working image stops linking, the second because `fetch_libs.sh` clones unpinned (see below).
+- **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Two jobs on every push, pull request, manual dispatch, and weekly. `test` runs the host suite and the documentation-reference check with no cross toolchain (~1 minute). `firmware` is a matrix over all three boards, each sweeping **every** engine plus `diag` — a full board sweep is ~40 s on 16 cores, cheap enough that there is no reason to test a subset. The matrix is the point: only one board's driver compiles per build, so a change to `patch_init_board.h` is invisible to a `BOARD=patch` build, which is how that file carried a stale libDaisy GPIO call through an API change unnoticed. The ARM toolchain is pinned to the 10.x generation the project is developed against, because the vendored trees (Faust kernels, the gen~ export, Rings/Plaits, softcut-lib) are not known to be clean under a modern GCC and Ubuntu's package is 14.x. Firmware sizes are written to each run's summary, because several engines needed `-Os` to fit SRAM_EXEC and a size regression is how a working image stops linking. The job fails if `libs/` is not at the pinned library revisions (see below).
 
 - **`make smoke-engines`** (in `app/`) — one engine per **distinct build shape** rather than a sample of the interesting DSP: header-only, single `.cpp`, source wildcard, `.cc` sources, the `-Os` overrides, the streaming opt-in, the gen~ and vendored include paths, and the one `BOOT_QSPI` app. About a third of the work of a full sweep, for a local "did I break a build shape" check. `make list-smoke-engines` prints the set.
 
-- **A "Tests and CI" section in the README**, and a note in `scripts/fetch_libs.sh` recording that it clones libDaisy and DaisySP **unpinned** (`--depth 1` of the default branch). That makes the build non-reproducible across time and lets CI go red with no commit on this side; the note carries the known-good revisions and what pinning would cost. Left as a deliberate policy choice rather than changed.
+- **A "Tests and CI" section in the README.**
 
-- **[`REVIEW.md`](REVIEW.md)** — a full review of the platform layer: what holds up, the correctness and architecture findings ranked by severity, the UI notes, and a prioritised plan. Section 12 logs which findings were acted on (with the verification for each) and which are still open, so a fix can be read against the reasoning that produced it.
+- **libDaisy and DaisySP are pinned** in `scripts/fetch_libs.sh`, to `cc146d5` (2026-08-11) and `599511b` (2025-05-29), the pair the full engine x board matrix and both `pod/` harnesses build clean against. The script previously cloned the tip of each default branch, so builds were not reproducible and CI could break with no commit here. An existing `libs/` on another revision is re-pinned and rebuilt clean. `fetch_libs.sh --check` verifies the pins; `make dist` and CI run it, and `MANIFEST.txt` records both revisions.
 
 - **Generic engine host (`app/`)** — one harness that runs any ported sk-engines engine on any of the three boards, with the engine chosen at build time (`make ENGINE=delay BOARD=patch`). Replaces the one-harness-per-engine pattern: `harness.cpp` builds the `EngineContext`, drives `process()` from the audio callback, and maps the panel onto `IEngine` without knowing which engine it is hosting. Each `(engine, board)` pair builds into its own `build-<engine>-<board>/`, so switching engines no longer needs `rm -rf build`. See [`app/README.md`](app/README.md).
 
@@ -122,6 +124,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Release packaging: a root `Makefile` with `make dist` (and `make gh-release`) driving `scripts/build_release.py`, which clean-builds the full engine x board matrix in one shot and collects version-stamped `daisy-<engine>-<board>-<version>.bin` artifacts under `dist/<version>/` with `SHA256SUMS`, `MANIFEST.txt`, and `RELEASE_NOTES.md` (CHANGELOG section + flashing guide). `RELEASE_ENGINES` / `RELEASE_BOARDS` restrict the matrix to a subset (e.g. a single board or pair), `VERSION` sets the version, and `WITH_HEX=1` also emits `.hex` artifacts.
 
 ### Fixed
+
+- **`glitch`: changing algorithm, regenerating, or turning a knob tore the voice mid-block.** `Voice::set_algo` resets the voice's whole `State`, rewrites its 4000-sample buffer and advances its RNG; `regen()` and the setters write the same state. All ran on the main loop while `process()` ran the voice in the audio ISR. The engine now records the request and applies it at the start of `process()`, so the voice is mutated in one context only. `glitch_voice.h` is unchanged.
+
+- **`reso` could lose a model change.** Rings' `Part::Process` clears its `dirty_` flag after reconfiguring the resonators, so a `set_model` from the main loop landing during the reconfigure was wiped and the old model kept playing. `set_model` is now called from `process()`, before each `Part::Process`. The Rings sources are unchanged.
+
+- **The Csound harness wrote both knobs to Csound on every main-loop pass**, with no deadband, unlike the ChucK harness. Each write is a `csoundSetControlChannel` call. It now writes only on a change beyond 0.004, as ChucK does.
+
+- **The Csound harness did not link** against Csound 7: its `memalloc.c` calls `aligned_alloc`, and newlib-nano's `aligned_alloc` calls `posix_memalign`, which nano does not ship. `pod/harness_csound.cpp` now provides `posix_memalign` over `memalign`.
+
+- **V/Oct CV spanned +/-120 semitones instead of +/-60.** `kCvVoctSemitones` was the full 10 V span, but it scales a -1..1 reading, so it must be the half span.
+
+- **patch.init() CV jacks read -3..+1 after re-centring.** libDaisy initialises CV_5..CV_8 bipolar (-1..1); the harness assumed 0..1, so an unpatched jack sent -120 semitones. `patch_init_board.h` now rescales the jacks to the 0..1 that `Controls` documents. The pots on CV_1..CV_4 already read 0..1.
+
+- **`reso` could index Rings' pitch table out of bounds.** The note (knob + CV + drift spread + arp) was never clamped before `lut_pitch_ratio_high[257]`. Clamped to MIDI 0..127.
+
+- **External clock emitted each pulse's tick twice when the pulse arrived late.** The interpolator wrapped onto the next grid position before the edge emitted it again: 40 sixteenths per 8 beats instead of 32 at 1 PPQ. Each pulse now owns exactly `48 / ppq` sub-ticks; the interpolator stops short of the next pulse, and an early pulse flushes the rest of its share, so no step is skipped either.
+
+- **Gate out was high for one main-loop pass (microseconds).** `gate_out_triggered()` is clear-on-read and went straight to the pin. The harness now holds it for 7 ms, the width the engines assume.
+
+- **Releasing the encoder after the hold + knob-1 Aux gesture also fired a click** (deck toggle on Pod / patch.init, an action row on the Patch), because only encoder detents marked the hold as a gesture. Pressing alone also snapped the selector to knob 1. A press now seeds the selector from `engine.param(Aux)`, and only a knob move selects.
+
+- **ChucK: knob writes from the main loop raced MIDI writes from the ISR on ChucK's single-producer request queue**, which can move its head backwards and replay freed requests. `set_param` now caches and flags the slot; `process()` applies it before `run()`.
+
+- **Csound: a live reload could corrupt the newlib heap.** The main loop builds the new instance while the ISR can allocate a `MidiNote` instance; newlib's malloc hooks are no-ops by default. `pod/harness_csound.cpp` now defines `__malloc_lock` / `__malloc_unlock` with PRIMASK.
+
+- **Csound: an SD patch with `nchnls` other than 2 overran `spin`/`spout` every block.** I/O is now strided by the instance's channel counts; a mono patch plays on both outputs.
+
+- **A truncated or streamed WAV stalled a deck forever.** `WavStreamReader` trusted DataSize, so a short file never reached `eof()`. It now clamps to the file size, floors to whole frames (a partial frame misaligned every loop), and ends the stream on a zero-byte read. `RawStreamReader::begin_wav`'s clamp also wrapped in uint32 for DataSize `0xFFFFFFFF`, giving radio/bard a ~2^31-frame station.
+
+- **A recording was lost on power-off.** The header and FAT size were written only on stop. Recording now checkpoints every 256 KB (~1.4 s): it patches the header and calls `f_sync`.
+
+- **`make dist VERSION=..` deleted the repository.** The version is now rejected if it contains a path separator or is `.`/`..`.
+
+- **Release docs described a 2-engine matrix and called every binary a QSPI app.** The README now matches the 23-engine matrix. The flashing notes give the real boot types. Hardware validation is tracked per (engine, board) pair, from `docs/dev/hardware-bringup.md`, as a `tested` column in `MANIFEST.txt`.
 
 - **`granular` / `graincloud` could not record at all.** A deck constructs at `Mode::None`, and `_set_buf_armed()` has an empty `case Mode::None: break;` — so `rec` armed a deck that could never start, and both engines have no audio until something is recorded. Inert from boot with nothing indicating why. Fixed by implementing `IEngine::config()` for both (reading Route / ModType / Mode back from Core, which needed `const` overloads of `Core::deck()` and `Core::mod()`), and by teaching the action screen's first-visit cursor to land on a switch the engine reports as **unset**. That refines the "never land on a config" rule rather than contradicting it: clicking a switch with no position cannot lose anything, whereas clicking one that has a position would change it blind. An engine that reports *nothing* is still left alone, since there `-1` means "cannot see" rather than "unset".
 
@@ -207,4 +243,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Every field of `EngineContext` is now populated. The one capability still unserved is `CapWavCues`: the parser exists in `memory/wav.h` but nothing calls it after a load, and no engine in the set declares the bit.
 
-- One ported engine needed a source edit beyond the namespace — `edrums`, whose QSPI preset store was written against the bleeptools libDaisy fork's three-argument `PersistentStorage`. Rewritten against stock libDaisy's one-argument version, with the reasoning in a comment at the site. Every other engine is a verbatim copy.
+- Engine sources are sk-engines ports with local edits beyond the namespace, which should go upstream: `edrums`' QSPI preset store, rewritten against stock libDaisy's one-argument `PersistentStorage` (the bleeptools fork takes three); the `config()` read-back in eleven engines (Added); and the `reso`, `glitch`, `chuck` and `csound` fixes (Fixed).
+
+[Unreleased]: https://github.com/shakfu/daisy-apps/compare/0.1.0...HEAD
+[0.1.0]: https://github.com/shakfu/daisy-apps/releases/tag/0.1.0

@@ -20,10 +20,9 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # Weekly. Nothing here changes on its own EXCEPT the Daisy libraries: scripts/fetch_libs.sh clones
-    # libDaisy and DaisySP at the tip of their default branches with no pinned revision, so an upstream
-    # change can break this build with no commit on our side. A scheduled run turns that from "the next
-    # unrelated push fails mysteriously" into a dated, attributable failure.
+    # Weekly. The Daisy libraries are pinned (scripts/fetch_libs.sh), so what can still change with no
+    # commit here is the runner image, the actions and the toolchain download. A scheduled run dates
+    # such a failure instead of leaving it for the next unrelated push.
     - cron: '17 6 * * 1'
 
 concurrency:
@@ -80,8 +79,7 @@ jobs:
       # libs/ is gitignored and reproduced on demand (scripts/fetch_libs.sh clones + builds libDaisy
       # and DaisySP). Building both from scratch dominates this job, so it is cached.
       #
-      # The key is the fetch script's own hash: the script is what decides which revisions get built,
-      # so any change to it - including adding a pinned revision, which this repo should do - correctly
+      # The key is the fetch script's own hash: the script holds the pinned revisions, so moving a pin
       # invalidates the cache. Bump `-v1` by hand to force a rebuild for any other reason.
       - name: Cache libs/
         id: libs-cache
@@ -94,17 +92,14 @@ jobs:
         if: steps.libs-cache.outputs.cache-hit != 'true'
         run: scripts/fetch_libs.sh
 
-      # Record what actually got built. Because the clone above is unpinned, this is the only place the
-      # upstream revisions are written down, and it is what makes a drift failure diagnosable.
-      - name: Record library revisions
+      # Fail if libs/ (fetched or restored from cache) is not at the pinned revisions, and record them.
+      - name: Check library pins
         run: |
           {
             echo "### Libraries (board ${{ matrix.board }})"
             echo '```'
             arm-none-eabi-gcc --version | head -1
-            for lib in libDaisy DaisySP; do
-              printf '%-10s %s\n' "$lib" "$(git -C "libs/$lib" rev-parse --short HEAD 2>/dev/null || echo '(no git metadata - restored from cache)')"
-            done
+            scripts/fetch_libs.sh --check
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

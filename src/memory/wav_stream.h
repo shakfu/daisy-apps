@@ -23,8 +23,11 @@ public:
     // wrong pitch. Matches the rate wav.h writes into recorded headers.
     static constexpr uint32_t kPlaybackSampleRate = 48000;
     static constexpr uint32_t kMaxChunks = 64;   // scan bound: refuse a pathological chunk list rather than loop
+    static constexpr uint32_t kBytesPerFrame = kWavBitsPerSample / 8;   // mono
 
     // `f` must be an open file positioned at 0. Returns false on a missing/invalid/unsupported header.
+    // `filesize` clamps DataSize to the bytes actually present: a truncated copy, or a streamed WAV
+    // with the 0xFFFFFFFF "unknown length" placeholder, would otherwise never reach eof().
     //
     // Spec-compliant chunk walk. After the 12-byte RIFF/WAVE header, the file is a list of chunks, each
     // `<4-byte id><LE32 size><body>` plus a single pad byte when `size` is odd. We step that list,
@@ -37,7 +40,7 @@ public:
     // frames with no conversion, so a non-native file would be reinterpreted as garbage. A reject here
     // becomes the deck's error flash (via start_play), not a mis-play. kWav* track the build (float32
     // default, int16 under LOFI_INT16).
-    bool begin(IByteFile* f) {
+    bool begin(IByteFile* f, uint32_t filesize) {
         _f = f; _remaining = 0; _data_start = 0; _data_size = 0;
 
         uint8_t riff[12];
@@ -78,10 +81,14 @@ public:
                 if (bits        != kWavBitsPerSample)   return false;
                 if (channels    != 1)                   return false;
                 if (sampleRate  != kPlaybackSampleRate) return false;
+                uint32_t ds = size;
+                if (body >= filesize) ds = 0;
+                else if (ds > filesize - body) ds = filesize - body;
+                ds -= ds % kBytesPerFrame;              // a partial frame would misalign every loop
                 if (!f->seek(body)) return false;
                 _data_start = body;
-                _data_size  = size;
-                _remaining  = size;
+                _data_size  = ds;
+                _remaining  = ds;
                 return true;
             }
             pos = body + size + (size & 1u);             // next chunk; chunks are word-aligned
@@ -93,6 +100,7 @@ public:
         if (n > _remaining) n = _remaining;
         const uint32_t got = _f->read(dst, n);
         _remaining -= got;
+        if (got == 0) _remaining = 0;   // file shorter than measured, or a read error: end the stream
         return got;
     }
     bool eof() const override { return _remaining == 0; }
@@ -127,6 +135,15 @@ public:
         const uint32_t w = _f->write(src, n);
         _body += w;
         return w;
+    }
+
+    // Mid-recording commit: patch the header with the size so far, return to the end of the body, and
+    // sync. A take cut short by power loss then reads as everything up to the last checkpoint.
+    bool checkpoint() {
+        const WavHeader h = wav_header(_body, _channels);
+        if (!_f->seek(0) || _f->write(&h, sizeof(h)) != sizeof(h)) return false;
+        if (!_f->seek(static_cast<uint32_t>(sizeof(h)) + _body)) return false;
+        return _f->sync();
     }
 
     void finalize() override {
